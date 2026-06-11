@@ -121,6 +121,10 @@ _klammer_io_handler() {
     local -a f
     f=("${(@ps:\t:)line}")
     (( f[2] == _klammer_id )) || return
+    # Never re-render an id we already displayed: the user may have rotated
+    # the list since, and a late duplicate would snap it back.
+    (( f[2] == _klammer_rendered_id )) && return
+    typeset -g _klammer_rendered_id=$f[2]
     _klammer_state=$f[3]
     _klammer_wstart=$f[4]
     _klammer_total=$f[5]
@@ -376,12 +380,18 @@ _klammer_precmd() {
 }
 
 autoload -Uz add-zsh-hook
-add-zsh-hook preexec _klammer_preexec
-add-zsh-hook precmd _klammer_precmd
+if [[ -z $KLAMMER_NO_RECORD ]]; then
+    add-zsh-hook preexec _klammer_preexec
+    add-zsh-hook precmd _klammer_precmd
+fi
 
 # ----- key bindings --------------------------------------------------------------
 
 bindkey '^I' _klammer_accept
+# zsh ships a whole ^X-prefix keymap (^X^X exchange-point-and-mark, ^Xu undo,
+# ^Xr isearch, ...). With those alive, a plain ^X waits for a second key and
+# swallows the next keystroke as a combo. Clear the prefix, then bind.
+bindkey -rp '^X' 2>/dev/null
 bindkey '^X' _klammer_next
 bindkey '^Z' _klammer_prev
 bindkey '^[[A' _klammer_hist_up
