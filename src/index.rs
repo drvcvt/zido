@@ -273,6 +273,9 @@ impl Index {
         }
         let mut lines: HashMap<&str, LineStat> = HashMap::new();
         for e in &self.entries {
+            if e.cmd.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+                continue;
+            }
             let s = lines.entry(e.cmd.as_str()).or_insert(LineStat {
                 count: 0,
                 last_ts: 0,
@@ -326,6 +329,11 @@ impl Index {
 // and values of secret-looking VAR=... assignments.
 fn indexable_token(t: &str) -> bool {
     if t.chars().count() > 48 {
+        return false;
+    }
+    // Paste markers (ESC[200~) and other control chars from old history
+    // entries must never surface as candidates.
+    if t.chars().any(|c| c.is_control()) {
         return false;
     }
     if let Some((name, value)) = t.split_once('=') {

@@ -31,20 +31,29 @@ typeset -gA _klammer_color=(
 
 # ----- daemon / connections -------------------------------------------------
 
-_klammer_spawn_daemon() {
-    [[ -S $KLAMMER_SOCK ]] && return 0
-    "$KLAMMER_BIN" daemon >>/tmp/klammer.log 2>&1 &!
+# Connect, spawning the daemon if needed; fd lands in REPLY. A stale socket
+# file (daemon died) must not block the respawn, so the test is a real
+# connect, never just [[ -S ]]. After a failed spawn we back off for 5s —
+# otherwise every keystroke would block in the wait loop.
+typeset -gF _klammer_retry_at=0
+
+_klammer_open_conn() {
+    zsocket "$KLAMMER_SOCK" 2>/dev/null && return 0
+    (( EPOCHREALTIME < _klammer_retry_at )) && return 1
+    # setsid detaches from this terminal: the daemon must survive the shell
+    # and must not die from SIGHUP when the pty closes.
+    setsid -f "$KLAMMER_BIN" daemon </dev/null >>/tmp/klammer.log 2>&1
     local -i i
     for i in {1..100}; do
-        [[ -S $KLAMMER_SOCK ]] && return 0
-        zselect -t 2 2>/dev/null || builtin read -t 0.02 -k 0 2>/dev/null
+        zsocket "$KLAMMER_SOCK" 2>/dev/null && return 0
+        zselect -t 2 2>/dev/null
     done
+    _klammer_retry_at=$(( EPOCHREALTIME + 5 ))
     return 1
 }
 
 _klammer_connect() {
-    _klammer_spawn_daemon || return 1
-    zsocket "$KLAMMER_SOCK" 2>/dev/null || return 1
+    _klammer_open_conn || return 1
     _klammer_fd=$REPLY
     zle -F $_klammer_fd _klammer_io_handler
     return 0
@@ -52,8 +61,7 @@ _klammer_connect() {
 
 _klammer_sync_connect() {
     [[ -n $_klammer_fd_sync ]] && return 0
-    _klammer_spawn_daemon || return 1
-    zsocket "$KLAMMER_SOCK" 2>/dev/null || return 1
+    _klammer_open_conn || return 1
     _klammer_fd_sync=$REPLY
     return 0
 }
@@ -79,25 +87,34 @@ _klammer_unescape() {
 
 _klammer_send_query() {
     if [[ -z $_klammer_fd ]]; then
-        _klammer_connect || return
+        _klammer_connect || { _klammer_clear_display; return }
     fi
     (( ++_klammer_id ))
     local cwd buf
     _klammer_escape "$PWD";    cwd=$REPLY
     _klammer_escape "$BUFFER"; buf=$REPLY
     if ! print -nu $_klammer_fd -- "Q"$'\t'"$_klammer_id"$'\t'"$COLUMNS"$'\t'"$CURSOR"$'\t'"$cwd"$'\t'"$buf"$'\n' 2>/dev/null; then
-        zle -F $_klammer_fd 2>/dev/null
+        local fd=$_klammer_fd
+        zle -F $fd 2>/dev/null
+        exec {fd}>&- 2>/dev/null
         _klammer_fd=""
-        _klammer_connect && _klammer_send_query
+        if _klammer_connect; then
+            _klammer_send_query
+        else
+            _klammer_clear_display
+        fi
     fi
 }
 
 _klammer_io_handler() {
     local fd=$1 line
     if ! IFS= read -r -u $fd line; then
+        # Connection gone (daemon died): never leave stale braces on screen.
         zle -F $fd 2>/dev/null
         [[ $fd == $_klammer_fd ]] && _klammer_fd=""
         exec {fd}>&- 2>/dev/null
+        zle _klammer-clear 2>/dev/null
+        zle -R 2>/dev/null
         return
     fi
     [[ $line == R$'\t'* ]] || return
@@ -156,16 +173,16 @@ _klammer_render_apply() {
             ;;
         single)
             local c1; _klammer_elide "$_klammer_cands[1]"; c1=$REPLY
-            pd="[${c1}]"
-            hl+=("0 1 ${_klammer_color[frame]}")
-            hl+=("1 $((1 + $#c1)) ${_klammer_color[${_klammer_srcs[1]:-hist}]},bold")
-            hl+=("$((1 + $#c1)) $#pd ${_klammer_color[frame]}")
+            pd=" [${c1}]"
+            hl+=("0 2 ${_klammer_color[frame]}")
+            hl+=("2 $((2 + $#c1)) ${_klammer_color[${_klammer_srcs[1]:-hist}]},bold")
+            hl+=("$((2 + $#c1)) $#pd ${_klammer_color[frame]}")
             ;;
         multi)
-            local -i avail=$(( COLUMNS - ( (_klammer_prompt_w + base) % COLUMNS ) - 2 ))
+            local -i avail=$(( COLUMNS - ( (_klammer_prompt_w + base) % COLUMNS ) - 3 ))
             (( avail < 16 )) && avail=16
-            pd="{"
-            hl+=("0 1 ${_klammer_color[frame]}")
+            pd=" {"
+            hl+=("0 2 ${_klammer_color[frame]}")
             local -i i shown=0
             local c
             for (( i = 1; i <= $#_klammer_cands && shown < 5; i++ )); do
@@ -203,6 +220,7 @@ _klammer_render_apply() {
     done
 }
 zle -N _klammer-render _klammer_render_apply
+zle -N _klammer-clear _klammer_clear_display
 
 # ----- per-keystroke hook ----------------------------------------------------
 
