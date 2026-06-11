@@ -74,7 +74,9 @@ impl Index {
             return;
         }
         let first = words[0].to_string();
-        bump(&mut self.first_tokens, &first, ts);
+        if indexable_token(&first) {
+            bump(&mut self.first_tokens, &first, ts);
+        }
         for w in &words {
             if !indexable_token(w) {
                 continue;
@@ -210,6 +212,10 @@ impl Index {
         let mut matcher = Matcher::new(Config::DEFAULT);
         let pattern = Pattern::new(needle, CaseMatching::Smart, Normalization::Smart, AtomKind::Fuzzy);
         let needle_lc = needle.to_lowercase();
+        // A needle without any alphanumeric chars ("[", "--", "./") fuzzy-
+        // matches every token containing those chars — pure noise. Require a
+        // prefix match in that case.
+        let needle_alnum = needle.chars().any(|c| c.is_alphanumeric());
         let mut buf = Vec::new();
 
         let mut best: HashMap<String, Candidate> = HashMap::new();
@@ -220,6 +226,9 @@ impl Index {
             };
             let mut score = mscore as i64 * W_MATCH;
             let text_lc = trimmed.to_lowercase();
+            if !needle_alnum && !text_lc.starts_with(&needle_lc) {
+                continue;
+            }
             if text_lc == needle_lc {
                 score += W_EXACT;
             } else if text_lc.starts_with(&needle_lc) {
@@ -448,6 +457,24 @@ mod tests {
         assert_eq!(r.state, State::None);
         let r = idx.query_word(1, "echo hunter", 11, "/p");
         assert!(r.candidates.iter().all(|c| c.text != "MY_PASSWORD=hunter2"));
+    }
+
+    #[test]
+    fn control_char_first_tokens_not_indexed() {
+        let idx = test_index(&[("\u{1b}[200~cd /tmp", "/p", 0), ("cargo build", "/p", 0)]);
+        let r = idx.query_word(1, "c", 1, "/p");
+        assert!(r.candidates.iter().all(|c| !c.text.contains('\u{1b}')));
+    }
+
+    #[test]
+    fn punctuation_needle_requires_prefix() {
+        let idx = test_index(&[("[ -f x ]", "/p", 0), ("echo a[b]c", "/p", 0)]);
+        let r = idx.query_word(1, "test [", 6, "/p");
+        assert!(
+            r.candidates.iter().all(|c| c.text.starts_with('[')),
+            "got: {:?}",
+            r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+        );
     }
 
     #[test]

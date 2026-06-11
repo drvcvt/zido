@@ -85,6 +85,11 @@ fn handle(stream: UnixStream, state: Arc<Mutex<State>>) {
                 if cmd.is_empty() {
                     continue;
                 }
+                // Escape sequences (paste markers, arrow-key residue from
+                // scripted ptys) must never enter the history db.
+                if cmd.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+                    continue;
+                }
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)

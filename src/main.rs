@@ -18,9 +18,10 @@ fn main() {
             _ => die("usage: klammer init zsh"),
         },
         Some("import") => import::run(),
+        Some("gc") => gc(),
         Some("query") => debug_query(&args[1..]),
         Some("--version") | Some("-V") => println!("klammer {}", env!("CARGO_PKG_VERSION")),
-        _ => die("usage: klammer <daemon|init zsh|import|query BUFFER>"),
+        _ => die("usage: klammer <daemon|init zsh|import|gc|query BUFFER>"),
     }
 }
 
@@ -36,6 +37,48 @@ fn print_init_zsh() {
         .and_then(|p| p.to_str().map(String::from))
         .unwrap_or_else(|| "klammer".into());
     print!("{}", script.replace("@KLAMMER_BIN@", &bin));
+}
+
+// Removes history rows containing escape sequences / control chars (old paste
+// markers, pty test residue). Restart the daemon afterwards to drop the
+// in-memory copies.
+fn gc() {
+    let conn = match db::open() {
+        Ok(c) => c,
+        Err(e) => die(&format!("cannot open history db: {e}")),
+    };
+    let mut stmt = conn.prepare("SELECT id, cmd FROM history").unwrap();
+    let ids: Vec<i64> = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .unwrap()
+        .flatten()
+        .filter(|(_, cmd)| {
+            cmd.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+                || cmd.split_whitespace().any(is_escape_residue)
+        })
+        .map(|(id, _)| id)
+        .collect();
+    drop(stmt);
+    for chunk in ids.chunks(500) {
+        let list: Vec<String> = chunk.iter().map(|i| i.to_string()).collect();
+        let _ = conn.execute(
+            &format!("DELETE FROM history WHERE id IN ({})", list.join(",")),
+            [],
+        );
+    }
+    println!("removed {} polluted history rows", ids.len());
+}
+
+// Tokens left behind when a terminal stripped the ESC from an escape
+// sequence: "[A".."[D" (arrows), "[200~"/"[201~" (paste markers), "[1;5C"
+// style modifiers.
+fn is_escape_residue(t: &str) -> bool {
+    let Some(rest) = t.strip_prefix('[') else { return false };
+    if rest.len() == 1 && rest.chars().all(|c| c.is_ascii_uppercase()) {
+        return true;
+    }
+    let body: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == ';').collect();
+    !body.is_empty() && rest[body.len()..].starts_with(['~', 'A', 'B', 'C', 'D'])
 }
 
 // One-shot query against a running daemon, for debugging and smoke tests.
@@ -63,13 +106,19 @@ fn debug_query(args: &[String]) {
     if fields.len() < 5 {
         die(&format!("bad response: {line}"));
     }
-    println!("state={} word_start={} total={}", fields[2], fields[3], fields[4]);
+    // Single buffered write with errors ignored: `klammer query | head`
+    // must not panic on SIGPIPE.
+    let mut out = format!(
+        "state={} word_start={} total={}\n",
+        fields[2], fields[3], fields[4]
+    );
     if let Some(cands) = fields.get(5) {
         for c in cands.split('\u{1f}').filter(|c| !c.is_empty()) {
             let mut parts = c.split('\u{1e}');
             let text = parts.next().unwrap_or("");
             let source = parts.next().unwrap_or("");
-            println!("  {text}  ({source})");
+            out.push_str(&format!("  {text}  ({source})\n"));
         }
     }
+    let _ = std::io::stdout().write_all(out.as_bytes());
 }

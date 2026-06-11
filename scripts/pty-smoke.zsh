@@ -5,7 +5,7 @@
 zmodload zsh/zpty || exit 1
 input=${1:-"git ch"}
 
-zpty klam zsh -i || exit 1
+zpty klam env KLAMMER_NO_RECORD=1 zsh -i || exit 1
 sleep 1.5
 zpty -n -w klam "$input"
 sleep 1.5
