@@ -4,6 +4,7 @@ use crate::sources;
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 // The frontend scrolls through candidates with a moving selection block, so
 // it needs the deep list, not just the visible window.
@@ -146,8 +147,17 @@ impl Index {
         // The match needle is the replaceable segment (basename for paths).
         let needle: String = chars[word_start..cursor].iter().collect();
         let ranked = self.rank(&needle, raw, cwd, &first_word);
-        let total = ranked.len();
-        let candidates: Vec<Candidate> = ranked.into_iter().take(MAX_CANDIDATES).collect();
+        let mut total = ranked.len();
+        let mut candidates: Vec<Candidate> = ranked.into_iter().take(MAX_CANDIDATES).collect();
+
+        // History tokens that name an existing directory must complete like
+        // one (trailing slash, no space on accept) — otherwise `cd ba` ⇥
+        // yields "bash " with a dead space instead of "bash-kurs/".
+        pathify(&mut candidates, cwd);
+        if dir_context(&first_word) {
+            candidates.retain(|c| c.source == Source::Dir);
+            total = candidates.len();
+        }
 
         let state = match candidates.len() {
             0 => State::None,
@@ -197,6 +207,18 @@ impl Index {
                 }
             })
             .collect();
+        pathify(&mut cands, cwd);
+        if dir_context(prefix[0]) {
+            // After `cd ` the local directories are candidates even without
+            // history evidence; history-backed ones keep their higher score.
+            let (files, _) = sources::file_candidates("", cwd);
+            for f in files {
+                if f.source == Source::Dir && !cands.iter().any(|c| c.text == f.text) {
+                    cands.push(Candidate { text: f.text, source: Source::Dir, score: 1 });
+                }
+            }
+            cands.retain(|c| c.source == Source::Dir);
+        }
         cands.sort_by(|a, b| b.score.cmp(&a.score).then(a.text.cmp(&b.text)));
         let total = cands.len();
         cands.truncate(MAX_CANDIDATES);
@@ -335,6 +357,47 @@ impl Index {
     }
 }
 
+// Commands whose arguments are directories: only Dir candidates make sense.
+// `z` is the user-facing zoxide alias for cd.
+fn dir_context(first_word: &str) -> bool {
+    matches!(first_word, "cd" | "z" | "pushd" | "rmdir")
+}
+
+// Upgrade history tokens that name an existing directory to Dir candidates
+// (trailing slash → the frontend appends no space on accept).
+fn pathify(cands: &mut [Candidate], cwd: &str) {
+    for c in cands.iter_mut() {
+        if c.source != Source::History {
+            continue;
+        }
+        // History tokens recorded WITH a trailing slash ("cd bash-kurs/")
+        // must upgrade too, or directory-only contexts drop them.
+        let trimmed = c.text.trim_end_matches('/');
+        let Some(p) = resolve_for_stat(trimmed, cwd) else { continue };
+        if std::fs::metadata(&p).map(|m| m.is_dir()).unwrap_or(false) {
+            if !c.text.ends_with('/') {
+                c.text.push('/');
+            }
+            c.source = Source::Dir;
+        }
+    }
+}
+
+fn resolve_for_stat(text: &str, cwd: &str) -> Option<PathBuf> {
+    if text.starts_with('-') {
+        return None;
+    }
+    Some(if let Some(rest) = text.strip_prefix("~/") {
+        crate::paths::home().join(rest)
+    } else if text == "~" {
+        crate::paths::home()
+    } else if text.starts_with('/') {
+        PathBuf::from(text)
+    } else {
+        Path::new(cwd).join(text)
+    })
+}
+
 // Tokens that should never appear as inline candidates: anything overly long
 // (base64 blobs, JWTs — fuzzy matching finds garbage subsequences in those)
 // and values of secret-looking VAR=... assignments.
@@ -457,6 +520,53 @@ mod tests {
         assert_eq!(r.state, State::None);
         let r = idx.query_word(1, "echo hunter", 11, "/p");
         assert!(r.candidates.iter().all(|c| c.text != "MY_PASSWORD=hunter2"));
+    }
+
+    fn pathify_fixture() -> String {
+        let base = std::env::temp_dir().join("klammer-test-pathify");
+        let _ = std::fs::create_dir_all(base.join("bash-kurs"));
+        let _ = std::fs::create_dir_all(base.join("projects"));
+        let _ = std::fs::write(base.join("notes.txt"), "x");
+        base.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn history_dir_tokens_complete_as_dirs() {
+        let cwd = pathify_fixture();
+        let idx = test_index(&[("cd bash-kurs", &cwd, 0), ("cat notes.txt", &cwd, 0)]);
+        let r = idx.query_word(1, "cd ba", 5, &cwd);
+        assert!(!r.candidates.is_empty());
+        assert_eq!(r.candidates[0].text, "bash-kurs/");
+        assert!(r.candidates.iter().all(|c| c.text.ends_with('/')), "cd must only offer dirs");
+    }
+
+    #[test]
+    fn slash_history_tokens_survive_dir_context() {
+        let cwd = pathify_fixture();
+        let idx = test_index(&[("cd bash-kurs/", &cwd, 0)]);
+        let r = idx.query_word(1, "cd ba", 5, &cwd);
+        assert!(
+            r.candidates.iter().any(|c| c.text == "bash-kurs/"),
+            "got: {:?}",
+            r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cd_predicts_local_dirs_without_history() {
+        let cwd = pathify_fixture();
+        let idx = test_index(&[("echo x", &cwd, 0)]);
+        let r = idx.query_word(1, "cd ", 3, &cwd);
+        assert!(r.candidates.iter().any(|c| c.text == "bash-kurs/"));
+        assert!(r.candidates.iter().all(|c| c.text.ends_with('/')));
+    }
+
+    #[test]
+    fn non_dir_commands_keep_files() {
+        let cwd = pathify_fixture();
+        let idx = test_index(&[("cat notes.txt", &cwd, 0)]);
+        let r = idx.query_word(1, "cat no", 6, &cwd);
+        assert!(r.candidates.iter().any(|c| c.text == "notes.txt"));
     }
 
     #[test]
