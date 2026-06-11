@@ -55,8 +55,12 @@ executes anything by itself.
 
 One mixed, ranked list per keystroke:
 
+- **zsh's real completions** — flags and subcommands you *never typed*
+  (`git push --fo` → `{--force | --force-with-lease | …}`), harvested
+  asynchronously from compsys and cached per context
 - **history tokens** — frecency-weighted, boosted when seen in this cwd or
-  with the same command
+  with the same command; when the completion system knows the context,
+  history tokens without same-command evidence rank down
 - **next-word prediction** — n-grams over your history (`git checkout ` →
   `{main | -b | …}`)
 - **whole history lines** — `↑`/`↓` cycles them, `^R` searches them
@@ -133,13 +137,15 @@ Per keystroke: buffer + cursor + cwd go to the daemon, the ranked reply
 renders asynchronously. Stale replies are dropped. Measured end-to-end:
 ~0.5 ms per interaction.
 
+compsys harvesting runs in a forked zpty (it inherits your full compinit
+world) behind a process-substitution relay, with a compadd wrapper
+collecting every offered match — the input path never waits for it.
+
 Tested by a zpty-driven integration suite (`scripts/test.sh`) asserting on
-real BUFFER/CURSOR/POSTDISPLAY state — 32 zle checks + 21 unit tests.
+real BUFFER/CURSOR/POSTDISPLAY state — 34 zle checks + 25 unit tests.
 
 ## Roadmap
 
-- **compsys capture** — feed zsh's real completions (flags, subcommands)
-  through the same ranked display
 - **bash frontend** via ble.sh against the same daemon
 
 ## License

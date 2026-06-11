@@ -11,6 +11,9 @@ pub enum Request {
     Lines { id: u64, cwd: String, buffer: String },
     Search { id: u64, limit: usize, cwd: String, query: String },
     Record { exit: i32, duration_ms: i64, cwd: String, cmd: String },
+    // compsys candidates captured by the frontend for one completion
+    // context (cwd + line prefix before the current word).
+    Comp { cwd: String, prefix: String, words: Vec<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -20,6 +23,7 @@ pub enum Source {
     File,
     Dir,
     Line,
+    Comp,
 }
 
 impl Source {
@@ -30,6 +34,7 @@ impl Source {
             Source::File => "file",
             Source::Dir => "dir",
             Source::Line => "line",
+            Source::Comp => "comp",
         }
     }
 }
@@ -158,6 +163,16 @@ pub fn parse_request(line: &str) -> Option<Request> {
             let cwd = unescape(fields.next()?);
             let query = unescape(&fields.collect::<Vec<_>>().join("\t"));
             Some(Request::Search { id, limit, cwd, query })
+        }
+        "C" => {
+            let cwd = unescape(fields.next()?);
+            let prefix = unescape(fields.next()?);
+            let words: Vec<String> = unescape(&fields.collect::<Vec<_>>().join("\t"))
+                .split('\u{1f}')
+                .filter(|w| !w.is_empty())
+                .map(String::from)
+                .collect();
+            Some(Request::Comp { cwd, prefix, words })
         }
         "H" => {
             let exit = fields.next()?.parse().ok()?;

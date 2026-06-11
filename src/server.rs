@@ -91,6 +91,9 @@ fn handle(stream: UnixStream, state: Arc<Mutex<State>>) {
                     break;
                 }
             }
+            Request::Comp { cwd, prefix, words } => {
+                state.lock().unwrap().index.set_comp(&cwd, &prefix, words);
+            }
             Request::Record { exit, duration_ms, cwd, cmd } => {
                 let cmd = cmd.trim();
                 if cmd.is_empty() {

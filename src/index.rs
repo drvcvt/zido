@@ -22,6 +22,14 @@ const W_FREC: f64 = 25.0;
 const W_CWD: i64 = 80;
 const W_SAME_CMD: i64 = 60;
 const W_FAIL: i64 = -50;
+// compsys candidates are context-exact, but history with real evidence
+// (same-command usage) must still win: modest bonus for comp, and a penalty
+// for history tokens with NO same-command evidence when the completion
+// system knows the context (those are usually noise from other commands).
+const W_COMP: i64 = 40;
+const W_CTX_MISS: i64 = -200;
+const COMP_TTL_SECS: u64 = 45;
+const COMP_MAX_CONTEXTS: usize = 100;
 
 #[derive(Default)]
 struct TokenStat {
@@ -43,6 +51,8 @@ pub struct Index {
     token_cwd: HashMap<(String, String), u32>,
     token_cmd: HashMap<(String, String), u32>,
     execs: Vec<String>,
+    // (cwd, line-prefix) → compsys candidates captured by the frontend.
+    comp_cache: HashMap<(String, String), (std::time::Instant, Vec<String>)>,
     now: fn() -> i64,
 }
 
@@ -62,6 +72,7 @@ impl Index {
             token_cwd: HashMap::new(),
             token_cmd: HashMap::new(),
             execs,
+            comp_cache: HashMap::new(),
             now: real_now,
         };
         for row in rows {
@@ -101,6 +112,24 @@ impl Index {
         });
     }
 
+    pub fn set_comp(&mut self, cwd: &str, prefix: &str, words: Vec<String>) {
+        if self.comp_cache.len() >= COMP_MAX_CONTEXTS {
+            self.comp_cache.clear();
+        }
+        self.comp_cache.insert(
+            (cwd.to_string(), prefix.to_string()),
+            (std::time::Instant::now(), words),
+        );
+    }
+
+    fn comp_words(&self, cwd: &str, prefix: &str) -> Option<&Vec<String>> {
+        let (when, words) = self.comp_cache.get(&(cwd.to_string(), prefix.to_string()))?;
+        if when.elapsed().as_secs() > COMP_TTL_SECS {
+            return None;
+        }
+        Some(words)
+    }
+
     fn frecency(&self, stat: &TokenStat) -> i64 {
         let age_days = ((self.now)() - stat.last_ts).max(0) as f64 / 86_400.0;
         let decay = 0.5_f64.powf(age_days / 30.0);
@@ -126,6 +155,7 @@ impl Index {
         let mut raw: Vec<Candidate> = Vec::new();
         let mut word_start = ws;
 
+        let mut has_comp = false;
         if word.contains('/') || word.starts_with('~') {
             let (files, seg_start) = sources::file_candidates(&word, cwd);
             raw = files;
@@ -143,11 +173,24 @@ impl Index {
             }
             let (files, _) = sources::file_candidates(&word, cwd);
             raw.extend(files);
+            // mirror the frontend's capture-key convention: option words get
+            // their own context captured with a '-' stub
+            let comp_key = if word.starts_with('-') {
+                format!("{before}-")
+            } else {
+                before.clone()
+            };
+            if let Some(words) = self.comp_words(cwd, &comp_key) {
+                has_comp = !words.is_empty();
+                for w in words {
+                    raw.push(Candidate { text: w.clone(), source: Source::Comp, score: 0, indices: vec![] });
+                }
+            }
         }
 
         // The match needle is the replaceable segment (basename for paths).
         let needle: String = chars[word_start..cursor].iter().collect();
-        let ranked = self.rank(&needle, raw, cwd, &first_word);
+        let ranked = self.rank(&needle, raw, cwd, &first_word, has_comp);
         let mut total = ranked.len();
         let mut candidates: Vec<Candidate> = ranked.into_iter().take(MAX_CANDIDATES).collect();
 
@@ -209,6 +252,21 @@ impl Index {
                 }
             })
             .collect();
+        if let Some(words) = self.comp_words(cwd, before) {
+            for w in words {
+                if !indexable_token(w) {
+                    continue;
+                }
+                if !cands.iter().any(|c| c.text == *w) {
+                    cands.push(Candidate {
+                        text: w.clone(),
+                        source: Source::Comp,
+                        score: 10,
+                        indices: vec![],
+                    });
+                }
+            }
+        }
         pathify(&mut cands, cwd);
         if dir_context(prefix[0]) {
             // After `cd ` the local directories are candidates even without
@@ -232,7 +290,14 @@ impl Index {
         Reply { id, state, word_start: cursor, total, candidates: cands }
     }
 
-    fn rank(&self, needle: &str, raw: Vec<Candidate>, cwd: &str, first_word: &str) -> Vec<Candidate> {
+    fn rank(
+        &self,
+        needle: &str,
+        raw: Vec<Candidate>,
+        cwd: &str,
+        first_word: &str,
+        has_comp: bool,
+    ) -> Vec<Candidate> {
         let mut matcher = Matcher::new(Config::DEFAULT);
         let pattern = Pattern::new(needle, CaseMatching::Smart, Normalization::Smart, AtomKind::Fuzzy);
         let needle_lc = needle.to_lowercase();
@@ -253,6 +318,9 @@ impl Index {
             if !needle_alnum && !text_lc.starts_with(&needle_lc) {
                 continue;
             }
+            if cand.source == Source::Comp {
+                score += W_COMP;
+            }
             if text_lc == needle_lc {
                 score += W_EXACT;
             } else if text_lc.starts_with(&needle_lc) {
@@ -269,10 +337,12 @@ impl Index {
                 {
                     score += W_CWD;
                 }
-                if !first_word.is_empty()
-                    && self.token_cmd.contains_key(&(cand.text.clone(), first_word.to_string()))
-                {
+                let same_cmd = !first_word.is_empty()
+                    && self.token_cmd.contains_key(&(cand.text.clone(), first_word.to_string()));
+                if same_cmd {
                     score += W_SAME_CMD;
+                } else if has_comp {
+                    score += W_CTX_MISS;
                 }
             }
             cand.score = score;
@@ -602,6 +672,51 @@ mod tests {
             "got: {:?}",
             r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn comp_outranks_contextblind_history() {
+        let mut idx = test_index(&[
+            ("aei --fov 103", "/x", 0),
+            ("aei --fov 103", "/x", 0),
+            ("aei --fov 103", "/x", 0),
+        ]);
+        idx.set_comp("/p", "git push -", vec!["--force".into(), "--force-with-lease".into()]);
+        let r = idx.query_word(1, "git push --fo", 13, "/p");
+        assert_eq!(r.candidates[0].text, "--force", "got: {:?}",
+            r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn comp_candidates_merge_into_arg_position() {
+        let mut idx = test_index(&[("git status", "/p", 0)]);
+        idx.set_comp("/p", "git push -", vec!["--force-with-lease".into(), "--tags".into()]);
+        let r = idx.query_word(1, "git push --fo", 13, "/p");
+        assert_eq!(r.candidates[0].text, "--force-with-lease");
+        assert!(matches!(r.candidates[0].source, Source::Comp));
+        // wrong prefix → no comp leak
+        let r = idx.query_word(1, "git pull --fo", 13, "/p");
+        assert!(r.candidates.iter().all(|c| c.text != "--force-with-lease"));
+    }
+
+    #[test]
+    fn comp_candidates_merge_into_prediction() {
+        let mut idx = test_index(&[("echo x", "/p", 0)]);
+        idx.set_comp("/p", "git ", vec!["status".into(), "push".into()]);
+        let r = idx.query_word(1, "git ", 4, "/p");
+        assert!(r.candidates.iter().any(|c| c.text == "status"));
+        assert!(r.candidates.iter().any(|c| c.text == "push"));
+    }
+
+    #[test]
+    fn history_outranks_comp_in_prediction() {
+        let mut idx = test_index(&[
+            ("git checkout main", "/p", 0),
+            ("git checkout main", "/p", 0),
+        ]);
+        idx.set_comp("/p", "git ", vec!["checkout".into(), "status".into()]);
+        let r = idx.query_word(1, "git ", 4, "/p");
+        assert_eq!(r.candidates[0].text, "checkout");
     }
 
     #[test]

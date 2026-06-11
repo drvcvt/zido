@@ -6,6 +6,8 @@
 zmodload zsh/net/socket 2>/dev/null || return 0
 zmodload zsh/zselect 2>/dev/null
 zmodload zsh/datetime 2>/dev/null
+zmodload zsh/system 2>/dev/null
+zmodload zsh/zpty 2>/dev/null
 autoload -Uz add-zle-hook-widget
 
 typeset -g ZIDO_SOCK="${XDG_RUNTIME_DIR:-/tmp}/zido.sock"
@@ -36,6 +38,7 @@ typeset -gi _zido_saved_cur=0 _zido_pending=0
     sel      'fg=0,bg=250'
     match    'fg=3,bold'
     selmatch 'fg=0,bg=250,bold,underline'
+    comp     'fg=6'
 )
 
 # ----- daemon / connections -------------------------------------------------
@@ -95,6 +98,7 @@ _zido_unescape() {
 # ----- async query path -----------------------------------------------------
 
 _zido_send_query() {
+    [[ -n ${_ZIDO_CAPTURE:-} ]] && return
     if [[ -z $_zido_fd ]]; then
         _zido_connect || { _zido_clear_display; return }
     fi
@@ -349,6 +353,166 @@ _zido_render_search() {
 zle -N _zido-render _zido_render_apply
 zle -N _zido-clear _zido_clear_display
 
+# ----- compsys capture --------------------------------------------------------
+# zsh's real completions (flags, subcommands, ...), harvested per context:
+# a forked zpty inherits the user's full compinit world and runs the
+# completion machinery once for the line prefix with an empty current word;
+# a compadd wrapper collects every match. The daemon caches the set per
+# (cwd, prefix) and narrows it per keystroke like any other source.
+typeset -g _zido_cap_fd="" _zido_cap_key="" _zido_cap_buf="" _zido_cap_prefix=""
+
+# Runs INSIDE the capture child. Always forwards to the builtin first so
+# completion semantics stay intact; the copy of "$@" is parsed only to
+# extract the match words.
+_zido_cap_compadd() {
+    builtin compadd "$@"
+    local -i ret=$?
+    (( ${#_zido_cap_words} >= 2000 )) && return ret
+    local -a _zo _oad _aflag
+    zparseopts -D -E -a _zo P: S: p: s: i: I: W: d: J: V: X: x: r: R: E: M+: F: o+: D:=_oad O:=_oad A:=_oad q e Q n U C f w l 1 2 a=_aflag k=_aflag 2>/dev/null || return ret
+    (( ${#_oad} )) && return ret
+    if (( ${#_aflag} )); then
+        # -a/-k: the positional args are ARRAY NAMES, not words
+        local n
+        for n in "$@"; do
+            _zido_cap_words+=(${(P)n})
+        done
+    else
+        _zido_cap_words+=("$@")
+    fi
+    return ret
+}
+
+_zido_cap_widget() {
+    typeset -ga _zido_cap_words=()
+    functions[compadd]=$functions[_zido_cap_compadd]
+    CURSOR=$#BUFFER
+    # invoke compinit's own complete-word widget — _main_complete may only
+    # run in completion-widget context
+    zle -- ${(k)widgets[(r)completion:.complete-word:_main_complete]} 2>/dev/null
+    print -rn -- $'\x00'"${(pj:\x1f:)_zido_cap_words}"$'\x00'
+    exit 0
+}
+
+_zido_cap_child() {
+    # We are a fork of the interactive shell: neutralise the inherited zido
+    # state so the child never writes on the parent's daemon connections or
+    # spawns captures of its own.
+    typeset -g _ZIDO_CAPTURE=1
+    typeset -g _zido_fd="" _zido_fd_sync="" _zido_cap_fd=""
+    add-zle-hook-widget -d line-pre-redraw _zido_precheck 2>/dev/null
+    add-zle-hook-widget -d line-init _zido_line_init 2>/dev/null
+    # completion inside vared completes the variable VALUE; clearing the
+    # vared flag inside the completer makes it behave like a command line
+    autoload +X _complete 2>/dev/null
+    functions[_zido_orig_complete]=$functions[_complete]
+    _complete() { unset 'compstate[vared]'; _zido_orig_complete "$@" }
+    zle -N _zido-cap-widget _zido_cap_widget
+    bindkey '^I' _zido-cap-widget
+    # the line prefix arrives via inherited variable: zpty re-splits command
+    # arguments at whitespace and would truncate it
+    local tmp=$_zido_cap_arg
+    vared tmp 2>/dev/null
+    exit 0
+}
+
+_zido_cap_maybe_spawn() {
+    [[ -n ${_ZIDO_CAPTURE:-} ]] && return
+    (( ${+functions[_main_complete]} )) || return
+    (( ${+builtins[sysread]} && ${+builtins[zpty]} )) || return
+    local before=${BUFFER[1,$CURSOR]}
+    [[ $before == *$'\n'* ]] && return
+    local word=${before##*[[:space:]]}
+    [[ $word == */* || $word == \~* ]] && return
+    local prefix=${before[1,$(( $#before - $#word ))]}
+    # first word: PATH executables cover it, compsys command completion is slow
+    [[ $prefix == *[^[:space:]]* ]] || return
+    # explicit array: ${${(z)x}[1]} collapses to a scalar for one-word
+    # prefixes and [1] would grab the first CHARACTER
+    local -a pwords
+    pwords=(${(z)prefix})
+    case ${pwords[1]:-} in cd|z|pushd|rmdir) return ;; esac
+    # compsys picks flags vs arguments by looking at the current word: a
+    # word starting with '-' needs its own capture with a '-' stub
+    [[ $word == -* ]] && prefix+="-"
+    local key="$PWD"$'\x1e'"$prefix"
+    [[ $key == $_zido_cap_key ]] && return
+    _zido_cap_key=$key
+    _zido_cap_prefix=$prefix
+    _zido_cap_buf=""
+    if [[ -n $_zido_cap_fd ]]; then
+        zle -F $_zido_cap_fd 2>/dev/null
+        exec {_zido_cap_fd}>&- 2>/dev/null
+        _zido_cap_fd=""
+    fi
+    typeset -g _zido_cap_arg=$prefix
+    # The zpty lives inside a process-substitution subshell: a fork straight
+    # out of zle context inherits "zle active" and vared dies with "ZLE
+    # cannot be used recursively". The subshell boundary resets that state;
+    # the parent only reads the relay pipe.
+    exec {_zido_cap_fd}< <(
+        local out chunk
+        integer i
+        zpty -b zidocap _zido_cap_child 2>/dev/null || exit 0
+        zpty -n -w zidocap $'\t' 2>/dev/null
+        for (( i = 0; i < 300; i++ )); do
+            if zpty -rt zidocap chunk 2>/dev/null; then
+                out+=$chunk
+                [[ $out == *$'\x00'*$'\x00'* ]] && break
+            else
+                zselect -t 2 2>/dev/null
+            fi
+        done
+        zpty -d zidocap 2>/dev/null
+        out=${out#*$'\x00'}
+        print -rn -- $'\x00'"${out%%$'\x00'*}"$'\x00'
+    ) 2>/dev/null
+    if [[ -z $_zido_cap_fd ]]; then
+        _zido_cap_key=""
+        return
+    fi
+    zle -F $_zido_cap_fd _zido_cap_io
+}
+
+_zido_cap_io() {
+    local fd=$1 chunk
+    if ! sysread -i $fd chunk 2>/dev/null; then
+        zle -F $fd 2>/dev/null
+        exec {fd}>&- 2>/dev/null
+        [[ $fd == $_zido_cap_fd ]] && _zido_cap_fd=""
+        _zido_cap_finish
+        return
+    fi
+    _zido_cap_buf+=$chunk
+    if [[ $_zido_cap_buf == *$'\x00'*$'\x00'* ]]; then
+        zle -F $fd 2>/dev/null
+        exec {fd}>&- 2>/dev/null
+        [[ $fd == $_zido_cap_fd ]] && _zido_cap_fd=""
+        _zido_cap_finish
+    fi
+}
+
+_zido_cap_finish() {
+    local data=${_zido_cap_buf#*$'\x00'}
+    [[ $data == $_zido_cap_buf ]] && { _zido_cap_buf=""; return }
+    data=${data%%$'\x00'*}
+    _zido_cap_buf=""
+    [[ -n $data ]] || return
+    _zido_sync_connect || return
+    local cwd pfx words
+    _zido_escape "$PWD";              cwd=$REPLY
+    _zido_escape "$_zido_cap_prefix"; pfx=$REPLY
+    _zido_escape "$data";             words=$REPLY
+    print -nu $_zido_fd_sync -- "C"$'\t'"$cwd"$'\t'"$pfx"$'\t'"$words"$'\n' 2>/dev/null || return
+    zle _zido-requery 2>/dev/null
+    zle -R 2>/dev/null
+}
+
+_zido_requery_widget() {
+    _zido_send_query
+}
+zle -N _zido-requery _zido_requery_widget
+
 # ----- per-keystroke hook ----------------------------------------------------
 
 _zido_precheck() {
@@ -366,6 +530,7 @@ _zido_precheck() {
     fi
     _zido_inhist=0
     _zido_send_query
+    [[ $_zido_mode == inline ]] && _zido_cap_maybe_spawn
 }
 add-zle-hook-widget line-pre-redraw _zido_precheck
 

@@ -87,6 +87,8 @@ _kt() {
 zle -N _kt
 bindkey "^T" _kt
 bindkey -M zido-search "^T" _kt 2>/dev/null
+_zidotest_completer() { compadd alpha-one alpha-two beta-three }
+compdef _zidotest_completer zidotestcmd 2>/dev/null
 print KLAMTEST-READY
 EOF
 
@@ -227,6 +229,16 @@ send $'\x07'; sleep 0.4
 dump && {
     check "T11d-canceled-inline" 'inline' "$(field MODE)"
     check "T11d-buffer-restored" 'zzqq' "$(field BUF)"
+}
+
+# T12: compsys capture — words from zsh's real completion system show up even
+# though they were never typed (custom completer, fully deterministic)
+new_line
+send 'zidotestcmd '; sleep 2.0
+send 'al'; sleep 1.5
+dump && {
+    check "T12-comp-candidates" '*alpha-one*' "$(field PD)"
+    check_eq "T12-comp-no-beta" "$(field PD)" "${$(field PD)/beta/XX}"
 }
 
 # T10: exactly one ^X binding — any surviving ^X-prefix combo makes zsh wait
