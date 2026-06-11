@@ -14,11 +14,13 @@ typeset -g KLAMMER_BIN="@KLAMMER_BIN@"
 typeset -g _klammer_fd="" _klammer_fd_sync=""
 typeset -gi _klammer_id=0 _klammer_wstart=0 _klammer_total=0
 typeset -gi _klammer_suppress=0 _klammer_inhist=0 _klammer_lidx=0
+typeset -gi _klammer_sel=1 _klammer_off=1
 typeset -g _klammer_state=empty _klammer_lastkey="<reset>" _klammer_origin=""
 typeset -ga _klammer_cands _klammer_srcs _klammer_lines
 typeset -g _klammer_prompt_w=3
 
-# Colours per source; frame = braces and separators.
+# Colours per source; frame = braces and separators; sel = the selection
+# block (light grey background, black text).
 typeset -gA _klammer_color=(
     hist    'fg=3'
     line    'fg=3'
@@ -27,6 +29,7 @@ typeset -gA _klammer_color=(
     dir     'fg=4,bold'
     frame   'fg=8'
     nomatch 'fg=1'
+    sel     'fg=0,bg=250'
 )
 
 # ----- daemon / connections -------------------------------------------------
@@ -128,6 +131,8 @@ _klammer_io_handler() {
     _klammer_state=$f[3]
     _klammer_wstart=$f[4]
     _klammer_total=$f[5]
+    _klammer_sel=1
+    _klammer_off=1
     _klammer_cands=()
     _klammer_srcs=()
     if (( $#f >= 6 )) && [[ -n $f[6] ]]; then
@@ -179,33 +184,56 @@ _klammer_render_apply() {
             local c1; _klammer_elide "$_klammer_cands[1]"; c1=$REPLY
             pd=" [${c1}]"
             hl+=("0 2 ${_klammer_color[frame]}")
-            hl+=("2 $((2 + $#c1)) ${_klammer_color[${_klammer_srcs[1]:-hist}]},bold")
+            hl+=("2 $((2 + $#c1)) ${_klammer_color[sel]}")
             hl+=("$((2 + $#c1)) $#pd ${_klammer_color[frame]}")
             ;;
         multi)
             local -i avail=$(( COLUMNS - ( (_klammer_prompt_w + base) % COLUMNS ) - 3 ))
             (( avail < 16 )) && avail=16
-            pd=" {"
-            hl+=("0 2 ${_klammer_color[frame]}")
-            local -i i shown=0
-            local c
-            for (( i = 1; i <= $#_klammer_cands && shown < 5; i++ )); do
-                _klammer_elide "$_klammer_cands[i]"; c=$REPLY
-                if (( shown > 0 && $#pd + $#c + 9 > avail )); then
-                    break
+            # Selection block walks right through the visible window; once it
+            # hits the right edge the window scrolls instead, eating into the
+            # …+N overflow. off = first visible candidate.
+            local -i off=$_klammer_off i shown last
+            local c spec
+            (( off < 1 )) && off=1
+            (( off > _klammer_sel )) && off=$_klammer_sel
+            while true; do
+                pd=" {"
+                hl=("0 2 ${_klammer_color[frame]}")
+                if (( off > 1 )); then
+                    hl+=("$#pd $(($#pd + 4)) ${_klammer_color[frame]}")
+                    pd+="… | "
                 fi
-                if (( shown > 0 )); then
-                    hl+=("$#pd $(($#pd + 3)) ${_klammer_color[frame]}")
-                    pd+=" | "
+                shown=0
+                for (( i = off; i <= $#_klammer_cands && shown < 5; i++ )); do
+                    _klammer_elide "$_klammer_cands[i]"; c=$REPLY
+                    if (( shown > 0 && $#pd + $#c + 9 > avail )); then
+                        break
+                    fi
+                    if (( shown > 0 )); then
+                        hl+=("$#pd $(($#pd + 3)) ${_klammer_color[frame]}")
+                        pd+=" | "
+                    fi
+                    pos=$#pd
+                    if (( i == _klammer_sel )); then
+                        spec=${_klammer_color[sel]}
+                    else
+                        spec=${_klammer_color[${_klammer_srcs[i]:-hist}]}
+                    fi
+                    hl+=("$pos $((pos + $#c)) $spec")
+                    pd+="$c"
+                    (( shown++ ))
+                done
+                last=$(( off + shown - 1 ))
+                # Selection fell off the right edge: scroll one step, rebuild.
+                if (( _klammer_sel > last && off < $#_klammer_cands )); then
+                    (( off++ ))
+                    continue
                 fi
-                pos=$#pd
-                local spec=${_klammer_color[${_klammer_srcs[i]:-hist}]}
-                (( shown == 0 )) && spec+=",bold"
-                hl+=("$pos $((pos + $#c)) $spec")
-                pd+="$c"
-                (( shown++ ))
+                break
             done
-            local -i overflow=$(( _klammer_total - shown ))
+            _klammer_off=$off
+            local -i overflow=$(( _klammer_total - last ))
             if (( overflow > 0 )); then
                 local tail=" | …+${overflow}"
                 hl+=("$#pd $(($#pd + $#tail)) ${_klammer_color[frame]}")
@@ -256,7 +284,7 @@ add-zle-hook-widget line-init _klammer_line_init
 
 _klammer_accept() {
     if (( $#_klammer_cands )) && [[ $_klammer_state == (multi|single) ]]; then
-        local cand=$_klammer_cands[1]
+        local cand=$_klammer_cands[$_klammer_sel]
         local before=${BUFFER[1,$_klammer_wstart]}
         local after=${BUFFER[$((CURSOR + 1)),-1]}
         BUFFER="${before}${cand}${after}"
@@ -273,16 +301,15 @@ zle -N _klammer_accept
 
 _klammer_next() {
     (( $#_klammer_cands > 1 )) || return 0
-    _klammer_cands=("${(@)_klammer_cands[2,-1]}" "$_klammer_cands[1]")
-    _klammer_srcs=("${(@)_klammer_srcs[2,-1]}" "$_klammer_srcs[1]")
+    (( _klammer_sel < $#_klammer_cands )) && (( _klammer_sel++ ))
     _klammer_render_apply
 }
 zle -N _klammer_next
 
 _klammer_prev() {
     (( $#_klammer_cands > 1 )) || return 0
-    _klammer_cands=("$_klammer_cands[-1]" "${(@)_klammer_cands[1,-2]}")
-    _klammer_srcs=("$_klammer_srcs[-1]" "${(@)_klammer_srcs[1,-2]}")
+    (( _klammer_sel > 1 )) && (( _klammer_sel-- ))
+    (( _klammer_sel < _klammer_off )) && _klammer_off=$_klammer_sel
     _klammer_render_apply
 }
 zle -N _klammer_prev

@@ -5,7 +5,9 @@ use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use std::collections::HashMap;
 
-const MAX_CANDIDATES: usize = 8;
+// The frontend scrolls through candidates with a moving selection block, so
+// it needs the deep list, not just the visible window.
+const MAX_CANDIDATES: usize = 100;
 const MAX_LINES: usize = 20;
 
 // Score weights. Nucleo scores land around 30-200 for short words; the

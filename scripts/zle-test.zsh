@@ -73,7 +73,7 @@ new_line() {
 zpty klam env KLAMMER_NO_RECORD=1 zsh -i || { print "cannot spawn zsh"; exit 1 }
 sleep 1.5
 drain
-send '_kt() { { print -r -- "BUF=$BUFFER"; print -r -- "CUR=$CURSOR"; print -r -- "PD=$POSTDISPLAY" } >| '$state' }; zle -N _kt; bindkey "^T" _kt'
+send '_kt() { { print -r -- "BUF=$BUFFER"; print -r -- "CUR=$CURSOR"; print -r -- "PD=$POSTDISPLAY"; print -r -- "SEL=$_klammer_sel"; print -r -- "OFF=$_klammer_off"; print -r -- "C1=${_klammer_cands[1]}" } >| '$state' }; zle -N _kt; bindkey "^T" _kt'
 send $'\r'
 sleep 0.8
 drain
@@ -88,10 +88,10 @@ dump && {
 }
 typeset -g pd_before=$(field PD)
 
-# T2: ^X rotates (display changes, buffer/cursor untouched)
+# T2: ^X moves the selection right (buffer/cursor untouched)
 send $'\x18'; sleep 0.4
 dump && {
-    check_ne "T2-rotation-changes-display" "$(field PD)" "$pd_before"
+    check "T2-selection-moves" '2' "$(field SEL)"
     check "T2-buffer-untouched" 'git ch' "$(field BUF)"
     check "T2-cursor-untouched" '6' "$(field CUR)"
 }
@@ -100,17 +100,40 @@ dump && {
 # (^X^X = exchange-point-and-mark would warp CURSOR to 0, ^Xu = undo)
 send $'\x18\x18'; sleep 0.5
 dump && {
+    check "T3-selection-at-4" '4' "$(field SEL)"
     check "T3-no-prefix-combo-buffer" 'git ch' "$(field BUF)"
     check "T3-no-cursor-warp" '6' "$(field CUR)"
 }
 
-# T4: ^Z rotates back to the original order (3x forward total, 3x back)
-send $'\x1a\x1a\x1a'; sleep 0.5
-dump && check_eq "T4-rotate-back" "$pd_before" "$(field PD)"
+# T4a: selection hits the right edge, then the window scrolls (left … marker
+# appears, OFF > 1)
+send $'\x18\x18\x18\x18'; sleep 0.6
+dump && {
+    check "T4a-selection-at-8" '8' "$(field SEL)"
+    check "T4a-window-scrolled" '<2->' "$(field OFF)"
+    check "T4a-left-ellipsis" ' {… | *' "$(field PD)"
+}
 
-# T5: Tab accepts the first candidate and appends a space
+# T4b: ^Z walks back to the start, original window restored
+send $'\x1a\x1a\x1a\x1a\x1a\x1a\x1a'; sleep 0.8
+dump && {
+    check "T4b-selection-back" '1' "$(field SEL)"
+    check_eq "T4b-window-restored" "$pd_before" "$(field PD)"
+}
+
+# T5: Tab accepts the selected candidate (selection is back at 1) + space
 send $'\t'; sleep 0.8
 dump && check "T5-tab-accepts" 'git checkout ' "$(field BUF)"
+
+# T5b: move selection then Tab — the selected (not the first) candidate lands
+dump
+typeset -g first_pred=$(field C1)
+send $'\x18'; sleep 0.4
+send $'\t'; sleep 0.8
+dump && {
+    check "T5b-accepts-selected" 'git checkout ?*' "$(field BUF)"
+    check_ne "T5b-not-first" "$(field BUF)" "git checkout $first_pred "
+}
 
 # T6: ^G dismisses the display
 send $'\x07'; sleep 0.4
