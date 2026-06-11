@@ -2,17 +2,17 @@ use std::path::PathBuf;
 
 pub fn socket_path() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        return PathBuf::from(dir).join("klammer.sock");
+        return PathBuf::from(dir).join("zido.sock");
     }
     let uid = libc_getuid();
-    PathBuf::from(format!("/tmp/klammer-{uid}.sock"))
+    PathBuf::from(format!("/tmp/zido-{uid}.sock"))
 }
 
 pub fn data_dir() -> PathBuf {
     let base = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home().join(".local/share"));
-    base.join("klammer")
+    base.join("zido")
 }
 
 pub fn db_path() -> PathBuf {

@@ -5,39 +5,39 @@
 emulate -L zsh
 zmodload zsh/zpty || exit 1
 
-wrap=/tmp/klammer-prof-wrap.zsh
-times=/tmp/klammer-prof-times.txt
-prof=/tmp/klammer-prof-zprof.txt
+wrap=/tmp/zido-prof-wrap.zsh
+times=/tmp/zido-prof-times.txt
+prof=/tmp/zido-prof-zprof.txt
 rm -f $times $prof
 
 cat > $wrap <<'EOF'
 zmodload zsh/zprof zsh/datetime
-functions[_klammer_next_orig]=$functions[_klammer_next]
-_klammer_next() {
+functions[_zido_next_orig]=$functions[_zido_next]
+_zido_next() {
     local -F t0=$EPOCHREALTIME
-    _klammer_next_orig
-    print -r -- $(( (EPOCHREALTIME - t0) * 1000 )) >>| /tmp/klammer-prof-times.txt
+    _zido_next_orig
+    print -r -- $(( (EPOCHREALTIME - t0) * 1000 )) >>| /tmp/zido-prof-times.txt
 }
 EOF
 
-zpty klam env KLAMMER_NO_RECORD=1 zsh -i || exit 1
+zpty zsess env ZIDO_NO_RECORD=1 zsh -i || exit 1
 sleep 1.2
-zpty -w klam "source $wrap"
+zpty -w zsess "source $wrap"
 sleep 0.8
 
-zpty -n -w klam "git ch"
+zpty -n -w zsess "git ch"
 sleep 1
 local -i i
 for i in {1..10}; do
-    zpty -n -w klam $'\x18'
+    zpty -n -w zsess $'\x18'
     sleep 0.15
 done
 sleep 0.5
-zpty -n -w klam $'\x03'
+zpty -n -w zsess $'\x03'
 sleep 0.4
-zpty -w klam "zprof | head -16 >| $prof"
+zpty -w zsess "zprof | head -16 >| $prof"
 sleep 0.8
-zpty -d klam
+zpty -d zsess
 
 print "=== ms per C-x (widget body only) ==="
 cat $times 2>/dev/null || print "no data"

@@ -15,13 +15,13 @@ fn main() {
         Some("daemon") => server::run(),
         Some("init") => match args.get(1).map(|s| s.as_str()) {
             Some("zsh") => print_init_zsh(),
-            _ => die("usage: klammer init zsh"),
+            _ => die("usage: zido init zsh"),
         },
         Some("import") => import::run(),
         Some("gc") => gc(),
         Some("query") => debug_query(&args[1..]),
-        Some("--version") | Some("-V") => println!("klammer {}", env!("CARGO_PKG_VERSION")),
-        _ => die("usage: klammer <daemon|init zsh|import|gc|query BUFFER>"),
+        Some("--version") | Some("-V") => println!("zido {}", env!("CARGO_PKG_VERSION")),
+        _ => die("usage: zido <daemon|init zsh|import|gc|query BUFFER>"),
     }
 }
 
@@ -35,8 +35,8 @@ fn print_init_zsh() {
     let bin = std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(String::from))
-        .unwrap_or_else(|| "klammer".into());
-    print!("{}", script.replace("@KLAMMER_BIN@", &bin));
+        .unwrap_or_else(|| "zido".into());
+    print!("{}", script.replace("@ZIDO_BIN@", &bin));
 }
 
 // Removes history rows containing escape sequences / control chars (old paste
@@ -106,7 +106,7 @@ fn debug_query(args: &[String]) {
     if fields.len() < 5 {
         die(&format!("bad response: {line}"));
     }
-    // Single buffered write with errors ignored: `klammer query | head`
+    // Single buffered write with errors ignored: `zido query | head`
     // must not panic on SIGPIPE.
     let mut out = format!(
         "state={} word_start={} total={}\n",

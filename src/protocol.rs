@@ -184,14 +184,14 @@ mod tests {
 
     #[test]
     fn parse_query() {
-        let req = parse_request("Q\t7\t120\t6\t/home/mt\tgit ch\n").unwrap();
+        let req = parse_request("Q\t7\t120\t6\t/home/user\tgit ch\n").unwrap();
         assert_eq!(
             req,
             Request::Query {
                 id: 7,
                 cols: 120,
                 cursor: 6,
-                cwd: "/home/mt".into(),
+                cwd: "/home/user".into(),
                 buffer: "git ch".into()
             }
         );

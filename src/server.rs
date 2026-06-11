@@ -13,7 +13,7 @@ struct State {
 pub fn run() {
     let sock = paths::socket_path();
     if UnixStream::connect(&sock).is_ok() {
-        eprintln!("klammer daemon already running at {}", sock.display());
+        eprintln!("zido daemon already running at {}", sock.display());
         return;
     }
     let _ = std::fs::remove_file(&sock);
@@ -28,7 +28,7 @@ pub fn run() {
     let rows = db::load_all(&conn).unwrap_or_default();
     let execs = sources::scan_path_execs();
     eprintln!(
-        "klammer daemon: {} history entries, {} executables",
+        "zido daemon: {} history entries, {} executables",
         rows.len(),
         execs.len()
     );

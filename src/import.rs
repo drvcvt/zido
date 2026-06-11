@@ -11,7 +11,10 @@ pub fn run() {
     };
     let mut total = 0usize;
 
-    let atuin_db = paths::home().join(".local/share/atuin/history.db");
+    let atuin_db = std::env::var("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| paths::home().join(".local/share"))
+        .join("atuin/history.db");
     if atuin_db.exists() {
         match import_atuin(&conn, &atuin_db) {
             Ok(n) => {

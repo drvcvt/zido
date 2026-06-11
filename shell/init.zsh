@@ -1,4 +1,4 @@
-# klammer zsh frontend. Emitted by `klammer init zsh`; @KLAMMER_BIN@ is
+# zido zsh frontend. Emitted by `zido init zsh`; @ZIDO_BIN@ is
 # replaced with the absolute binary path at init time.
 # Requires zsh 5.9 (region_highlight memo= field).
 
@@ -8,23 +8,24 @@ zmodload zsh/zselect 2>/dev/null
 zmodload zsh/datetime 2>/dev/null
 autoload -Uz add-zle-hook-widget
 
-typeset -g KLAMMER_SOCK="${XDG_RUNTIME_DIR:-/tmp}/klammer.sock"
-typeset -g KLAMMER_BIN="@KLAMMER_BIN@"
+typeset -g ZIDO_SOCK="${XDG_RUNTIME_DIR:-/tmp}/zido.sock"
+typeset -g ZIDO_BIN="@ZIDO_BIN@"
 
-typeset -g _klammer_fd="" _klammer_fd_sync=""
-typeset -gi _klammer_id=0 _klammer_wstart=0 _klammer_total=0
-typeset -gi _klammer_suppress=0 _klammer_inhist=0 _klammer_lidx=0
-typeset -gi _klammer_sel=1 _klammer_off=1
-typeset -g _klammer_state=empty _klammer_lastkey="<reset>" _klammer_origin=""
-typeset -ga _klammer_cands _klammer_srcs _klammer_inds _klammer_lines
-typeset -g _klammer_prompt_w=3
+typeset -g _zido_fd="" _zido_fd_sync=""
+typeset -gi _zido_id=0 _zido_wstart=0 _zido_total=0
+typeset -gi _zido_suppress=0 _zido_inhist=0 _zido_lidx=0
+typeset -gi _zido_sel=1 _zido_off=1
+typeset -g _zido_state=empty _zido_lastkey="<reset>" _zido_origin=""
+typeset -ga _zido_cands _zido_srcs _zido_inds _zido_lines
+typeset -g _zido_prompt_w=3
 # inline = braces while typing; search = ^R atuin-style vertical list
-typeset -g _klammer_mode=inline _klammer_saved=""
-typeset -gi _klammer_saved_cur=0 _klammer_pending=0
+typeset -g _zido_mode=inline _zido_saved=""
+typeset -gi _zido_saved_cur=0 _zido_pending=0
 
 # Colours per source; frame = braces and separators; sel = the selection
-# block (light grey background, black text).
-typeset -gA _klammer_color=(
+# block (light grey background, black text). Define the association before
+# sourcing this file (or override single keys after) to customise.
+(( ${+_zido_color} )) || typeset -gA _zido_color=(
     hist    'fg=3'
     line    'fg=3'
     exec    'fg=2'
@@ -43,40 +44,40 @@ typeset -gA _klammer_color=(
 # file (daemon died) must not block the respawn, so the test is a real
 # connect, never just [[ -S ]]. After a failed spawn we back off for 5s —
 # otherwise every keystroke would block in the wait loop.
-typeset -gF _klammer_retry_at=0
+typeset -gF _zido_retry_at=0
 
-_klammer_open_conn() {
-    zsocket "$KLAMMER_SOCK" 2>/dev/null && return 0
-    (( EPOCHREALTIME < _klammer_retry_at )) && return 1
+_zido_open_conn() {
+    zsocket "$ZIDO_SOCK" 2>/dev/null && return 0
+    (( EPOCHREALTIME < _zido_retry_at )) && return 1
     # setsid detaches from this terminal: the daemon must survive the shell
     # and must not die from SIGHUP when the pty closes.
-    setsid -f "$KLAMMER_BIN" daemon </dev/null >>/tmp/klammer.log 2>&1
+    setsid -f "$ZIDO_BIN" daemon </dev/null >>"${TMPDIR:-/tmp}/zido-$UID.log" 2>&1
     local -i i
     for i in {1..100}; do
-        zsocket "$KLAMMER_SOCK" 2>/dev/null && return 0
+        zsocket "$ZIDO_SOCK" 2>/dev/null && return 0
         zselect -t 2 2>/dev/null
     done
-    _klammer_retry_at=$(( EPOCHREALTIME + 5 ))
+    _zido_retry_at=$(( EPOCHREALTIME + 5 ))
     return 1
 }
 
-_klammer_connect() {
-    _klammer_open_conn || return 1
-    _klammer_fd=$REPLY
-    zle -F $_klammer_fd _klammer_io_handler
+_zido_connect() {
+    _zido_open_conn || return 1
+    _zido_fd=$REPLY
+    zle -F $_zido_fd _zido_io_handler
     return 0
 }
 
-_klammer_sync_connect() {
-    [[ -n $_klammer_fd_sync ]] && return 0
-    _klammer_open_conn || return 1
-    _klammer_fd_sync=$REPLY
+_zido_sync_connect() {
+    [[ -n $_zido_fd_sync ]] && return 0
+    _zido_open_conn || return 1
+    _zido_fd_sync=$REPLY
     return 0
 }
 
 # ----- protocol helpers -----------------------------------------------------
 
-_klammer_escape() {
+_zido_escape() {
     local s=${1//\\/\\\\}
     s=${s//$'\t'/\\t}
     s=${s//$'\n'/\\n}
@@ -85,7 +86,7 @@ _klammer_escape() {
 
 # Order is technically wrong for literal "\\t" in candidates, but candidates
 # containing backslash escapes are vanishingly rare in practice.
-_klammer_unescape() {
+_zido_unescape() {
     local s=${1//\\t/$'\t'}
     s=${s//\\n/$'\n'}
     REPLY=${s//\\\\/\\}
@@ -93,79 +94,79 @@ _klammer_unescape() {
 
 # ----- async query path -----------------------------------------------------
 
-_klammer_send_query() {
-    if [[ -z $_klammer_fd ]]; then
-        _klammer_connect || { _klammer_clear_display; return }
+_zido_send_query() {
+    if [[ -z $_zido_fd ]]; then
+        _zido_connect || { _zido_clear_display; return }
     fi
-    (( ++_klammer_id ))
+    (( ++_zido_id ))
     local cwd buf req
-    _klammer_escape "$PWD";    cwd=$REPLY
-    _klammer_escape "$BUFFER"; buf=$REPLY
-    if [[ $_klammer_mode == search ]]; then
-        req="S"$'\t'"$_klammer_id"$'\t'"50"$'\t'"$cwd"$'\t'"$buf"$'\n'
+    _zido_escape "$PWD";    cwd=$REPLY
+    _zido_escape "$BUFFER"; buf=$REPLY
+    if [[ $_zido_mode == search ]]; then
+        req="S"$'\t'"$_zido_id"$'\t'"50"$'\t'"$cwd"$'\t'"$buf"$'\n'
     else
-        req="Q"$'\t'"$_klammer_id"$'\t'"$COLUMNS"$'\t'"$CURSOR"$'\t'"$cwd"$'\t'"$buf"$'\n'
+        req="Q"$'\t'"$_zido_id"$'\t'"$COLUMNS"$'\t'"$CURSOR"$'\t'"$cwd"$'\t'"$buf"$'\n'
     fi
-    _klammer_pending=1
-    if ! print -nu $_klammer_fd -- "$req" 2>/dev/null; then
-        local fd=$_klammer_fd
+    _zido_pending=1
+    if ! print -nu $_zido_fd -- "$req" 2>/dev/null; then
+        local fd=$_zido_fd
         zle -F $fd 2>/dev/null
         exec {fd}>&- 2>/dev/null
-        _klammer_fd=""
-        if _klammer_connect; then
-            _klammer_send_query
+        _zido_fd=""
+        if _zido_connect; then
+            _zido_send_query
         else
-            _klammer_clear_display
+            _zido_clear_display
         fi
     fi
 }
 
-_klammer_io_handler() {
+_zido_io_handler() {
     local fd=$1 line
     if ! IFS= read -r -u $fd line; then
         # Connection gone (daemon died): never leave stale braces on screen.
         zle -F $fd 2>/dev/null
-        [[ $fd == $_klammer_fd ]] && _klammer_fd=""
+        [[ $fd == $_zido_fd ]] && _zido_fd=""
         exec {fd}>&- 2>/dev/null
-        zle _klammer-clear 2>/dev/null
+        zle _zido-clear 2>/dev/null
         zle -R 2>/dev/null
         return
     fi
     [[ $line == R$'\t'* ]] || return
     local -a f
     f=("${(@ps:\t:)line}")
-    (( f[2] == _klammer_id )) || return
+    (( f[2] == _zido_id )) || return
     # Never re-render an id we already displayed: the user may have rotated
     # the list since, and a late duplicate would snap it back.
-    (( f[2] == _klammer_rendered_id )) && return
-    typeset -g _klammer_rendered_id=$f[2]
-    _klammer_pending=0
-    _klammer_state=$f[3]
-    _klammer_wstart=$f[4]
-    _klammer_total=$f[5]
-    _klammer_sel=1
-    _klammer_off=1
-    _klammer_cands=()
-    _klammer_srcs=()
-    _klammer_inds=()
+    (( f[2] == _zido_rendered_id )) && return
+    typeset -g _zido_rendered_id=$f[2]
+    _zido_pending=0
+    _zido_state=$f[3]
+    _zido_wstart=$f[4]
+    _zido_total=$f[5]
+    _zido_sel=1
+    _zido_off=1
+    _zido_cands=()
+    _zido_srcs=()
+    _zido_inds=()
     if (( $#f >= 6 )) && [[ -n $f[6] ]]; then
         local p
         local -a cf
         for p in "${(@ps:\x1f:)f[6]}"; do
             cf=("${(@ps:\x1e:)p}")
-            _klammer_unescape "${cf[1]}"
-            _klammer_cands+=("$REPLY")
-            _klammer_srcs+=("${cf[2]:-hist}")
-            _klammer_inds+=("${cf[3]:-}")
+            _zido_unescape "${cf[1]}"
+            _zido_cands+=("$REPLY")
+            _zido_srcs+=("${cf[2]:-hist}")
+            _zido_inds+=("${cf[3]:-}")
         done
     fi
-    zle _klammer-render 2>/dev/null
+    zle _zido-render 2>/dev/null
     zle -R 2>/dev/null
 }
 
 # ----- rendering ------------------------------------------------------------
 
-_klammer_elide() {
+_zido_elide() {
     local s=$1
     if (( $#s > 36 )); then
         REPLY="${s[1,18]}…${s[-14,-1]}"
@@ -174,19 +175,19 @@ _klammer_elide() {
     fi
 }
 
-_klammer_clear_display() {
+_zido_clear_display() {
     POSTDISPLAY=""
-    region_highlight=("${(@)region_highlight:#*memo=klammer*}")
-    _klammer_state=empty
+    region_highlight=("${(@)region_highlight:#*memo=zido*}")
+    _zido_state=empty
 }
 
-_klammer_render_apply() {
-    if [[ $_klammer_mode == search ]]; then
-        _klammer_render_search
+_zido_render_apply() {
+    if [[ $_zido_mode == search ]]; then
+        _zido_render_search
         return
     fi
-    region_highlight=("${(@)region_highlight:#*memo=klammer*}")
-    if (( _klammer_suppress )) || [[ $_klammer_state == empty ]]; then
+    region_highlight=("${(@)region_highlight:#*memo=zido*}")
+    if (( _zido_suppress )) || [[ $_zido_state == empty ]]; then
         POSTDISPLAY=""
         return
     fi
@@ -195,50 +196,50 @@ _klammer_render_apply() {
     local pd=""
     local -a hl
 
-    case $_klammer_state in
+    case $_zido_state in
         none)
             pd=" [No match]"
-            hl+=("0 ${#pd} ${_klammer_color[nomatch]}")
+            hl+=("0 ${#pd} ${_zido_color[nomatch]}")
             ;;
         single)
-            local c1; _klammer_elide "$_klammer_cands[1]"; c1=$REPLY
+            local c1; _zido_elide "$_zido_cands[1]"; c1=$REPLY
             pd=" [${c1}]"
-            hl+=("0 2 ${_klammer_color[frame]}")
-            hl+=("2 $((2 + $#c1)) ${_klammer_color[sel]}")
-            hl+=("$((2 + $#c1)) $#pd ${_klammer_color[frame]}")
+            hl+=("0 2 ${_zido_color[frame]}")
+            hl+=("2 $((2 + $#c1)) ${_zido_color[sel]}")
+            hl+=("$((2 + $#c1)) $#pd ${_zido_color[frame]}")
             ;;
         multi)
-            local -i avail=$(( COLUMNS - ( (_klammer_prompt_w + base) % COLUMNS ) - 3 ))
+            local -i avail=$(( COLUMNS - ( (_zido_prompt_w + base) % COLUMNS ) - 3 ))
             (( avail < 16 )) && avail=16
             # Selection block walks right through the visible window; once it
             # hits the right edge the window scrolls instead, eating into the
             # …+N overflow. off = first visible candidate.
-            local -i off=$_klammer_off i shown last
+            local -i off=$_zido_off i shown last
             local c spec
             (( off < 1 )) && off=1
-            (( off > _klammer_sel )) && off=$_klammer_sel
+            (( off > _zido_sel )) && off=$_zido_sel
             while true; do
                 pd=" {"
-                hl=("0 2 ${_klammer_color[frame]}")
+                hl=("0 2 ${_zido_color[frame]}")
                 if (( off > 1 )); then
-                    hl+=("$#pd $(($#pd + 4)) ${_klammer_color[frame]}")
+                    hl+=("$#pd $(($#pd + 4)) ${_zido_color[frame]}")
                     pd+="… | "
                 fi
                 shown=0
-                for (( i = off; i <= $#_klammer_cands && shown < 5; i++ )); do
-                    _klammer_elide "$_klammer_cands[i]"; c=$REPLY
+                for (( i = off; i <= $#_zido_cands && shown < 5; i++ )); do
+                    _zido_elide "$_zido_cands[i]"; c=$REPLY
                     if (( shown > 0 && $#pd + $#c + 9 > avail )); then
                         break
                     fi
                     if (( shown > 0 )); then
-                        hl+=("$#pd $(($#pd + 3)) ${_klammer_color[frame]}")
+                        hl+=("$#pd $(($#pd + 3)) ${_zido_color[frame]}")
                         pd+=" | "
                     fi
                     pos=$#pd
-                    if (( i == _klammer_sel )); then
-                        spec=${_klammer_color[sel]}
+                    if (( i == _zido_sel )); then
+                        spec=${_zido_color[sel]}
                     else
-                        spec=${_klammer_color[${_klammer_srcs[i]:-hist}]}
+                        spec=${_zido_color[${_zido_srcs[i]:-hist}]}
                     fi
                     hl+=("$pos $((pos + $#c)) $spec")
                     pd+="$c"
@@ -246,20 +247,20 @@ _klammer_render_apply() {
                 done
                 last=$(( off + shown - 1 ))
                 # Selection fell off the right edge: scroll one step, rebuild.
-                if (( _klammer_sel > last && off < $#_klammer_cands )); then
+                if (( _zido_sel > last && off < $#_zido_cands )); then
                     (( off++ ))
                     continue
                 fi
                 break
             done
-            _klammer_off=$off
-            local -i overflow=$(( _klammer_total - last ))
+            _zido_off=$off
+            local -i overflow=$(( _zido_total - last ))
             if (( overflow > 0 )); then
                 local tail=" | …+${overflow}"
-                hl+=("$#pd $(($#pd + $#tail)) ${_klammer_color[frame]}")
+                hl+=("$#pd $(($#pd + $#tail)) ${_zido_color[frame]}")
                 pd+=$tail
             fi
-            hl+=("$#pd $(($#pd + 1)) ${_klammer_color[frame]}")
+            hl+=("$#pd $(($#pd + 1)) ${_zido_color[frame]}")
             pd+="}"
             ;;
     esac
@@ -268,38 +269,38 @@ _klammer_render_apply() {
     local h
     for h in "${hl[@]}"; do
         local -a parts=(${(s: :)h})
-        region_highlight+=("$((base + parts[1])) $((base + parts[2])) ${parts[3]} memo=klammer")
+        region_highlight+=("$((base + parts[1])) $((base + parts[2])) ${parts[3]} memo=zido")
     done
 }
 # ^R search: atuin-like vertical list under the prompt, ido-styled —
 # `{` opens, `|` leads each line, `…+N }` closes. The selection block walks
 # the lines, matched chars are highlighted.
-_klammer_render_search() {
-    region_highlight=("${(@)region_highlight:#*memo=klammer*}")
+_zido_render_search() {
+    region_highlight=("${(@)region_highlight:#*memo=zido*}")
     local -i base=$#BUFFER
     local pd=""
     local -a hl
 
-    if (( ! $#_klammer_cands )); then
-        if (( _klammer_pending )); then
+    if (( ! $#_zido_cands )); then
+        if (( _zido_pending )); then
             pd=$'\n'"{ … }"
         else
             pd=$'\n'"{ no matches }"
         fi
-        hl+=("0 $#pd ${_klammer_color[frame]}")
+        hl+=("0 $#pd ${_zido_color[frame]}")
     else
         local -i rows=8 avail=$(( COLUMNS - 6 ))
         (( avail < 20 )) && avail=20
-        local -i off=$_klammer_off
+        local -i off=$_zido_off
         (( off < 1 )) && off=1
-        (( _klammer_sel < off )) && off=$_klammer_sel
-        (( _klammer_sel > off + rows - 1 )) && off=$(( _klammer_sel - rows + 1 ))
-        _klammer_off=$off
+        (( _zido_sel < off )) && off=$_zido_sel
+        (( _zido_sel > off + rows - 1 )) && off=$(( _zido_sel - rows + 1 ))
+        _zido_off=$off
 
         local -i i n=0 lstart clipped p
         local line marker mspec
-        for (( i = off; i <= $#_klammer_cands && n < rows; i++ )); do
-            line=${_klammer_cands[i]//$'\n'/ }
+        for (( i = off; i <= $#_zido_cands && n < rows; i++ )); do
+            line=${_zido_cands[i]//$'\n'/ }
             clipped=0
             if (( $#line > avail )); then
                 line="${line[1,avail]}…"
@@ -311,17 +312,17 @@ _klammer_render_search() {
                 marker="| "
             fi
             pd+=$'\n'
-            hl+=("$#pd $(($#pd + 2)) ${_klammer_color[frame]}")
+            hl+=("$#pd $(($#pd + 2)) ${_zido_color[frame]}")
             pd+=$marker
             lstart=$#pd
-            if (( i == _klammer_sel )); then
-                hl+=("$lstart $((lstart + $#line)) ${_klammer_color[sel]}")
-                mspec=${_klammer_color[selmatch]}
+            if (( i == _zido_sel )); then
+                hl+=("$lstart $((lstart + $#line)) ${_zido_color[sel]}")
+                mspec=${_zido_color[selmatch]}
             else
-                mspec=${_klammer_color[match]}
+                mspec=${_zido_color[match]}
             fi
-            if [[ -n ${_klammer_inds[i]} ]]; then
-                for p in ${(s:,:)_klammer_inds[i]}; do
+            if [[ -n ${_zido_inds[i]} ]]; then
+                for p in ${(s:,:)_zido_inds[i]}; do
                     (( clipped && p >= clipped )) && continue
                     (( p >= $#line )) && continue
                     hl+=("$((lstart + p)) $((lstart + p + 1)) $mspec")
@@ -330,10 +331,10 @@ _klammer_render_search() {
             pd+=$line
             (( n++ ))
         done
-        local -i overflow=$(( _klammer_total - (off + n - 1) ))
+        local -i overflow=$(( _zido_total - (off + n - 1) ))
         local tail=" }"
         (( overflow > 0 )) && tail=" …+${overflow} }"
-        hl+=("$#pd $(($#pd + $#tail)) ${_klammer_color[frame]}")
+        hl+=("$#pd $(($#pd + $#tail)) ${_zido_color[frame]}")
         pd+=$tail
     fi
 
@@ -341,55 +342,55 @@ _klammer_render_search() {
     local h
     for h in "${hl[@]}"; do
         local -a parts=(${(s: :)h})
-        region_highlight+=("$((base + parts[1])) $((base + parts[2])) ${parts[3]} memo=klammer")
+        region_highlight+=("$((base + parts[1])) $((base + parts[2])) ${parts[3]} memo=zido")
     done
 }
 
-zle -N _klammer-render _klammer_render_apply
-zle -N _klammer-clear _klammer_clear_display
+zle -N _zido-render _zido_render_apply
+zle -N _zido-clear _zido_clear_display
 
 # ----- per-keystroke hook ----------------------------------------------------
 
-_klammer_precheck() {
+_zido_precheck() {
     if [[ $BUFFER == *$'\n'* ]]; then
-        _klammer_clear_display
+        _zido_clear_display
         return
     fi
     local key="$CURSOR:$BUFFER"
-    [[ $key == $_klammer_lastkey ]] && return
-    _klammer_lastkey=$key
-    _klammer_suppress=0
-    if (( ! _klammer_inhist )); then
-        _klammer_lines=()
-        _klammer_lidx=0
+    [[ $key == $_zido_lastkey ]] && return
+    _zido_lastkey=$key
+    _zido_suppress=0
+    if (( ! _zido_inhist )); then
+        _zido_lines=()
+        _zido_lidx=0
     fi
-    _klammer_inhist=0
-    _klammer_send_query
+    _zido_inhist=0
+    _zido_send_query
 }
-add-zle-hook-widget line-pre-redraw _klammer_precheck
+add-zle-hook-widget line-pre-redraw _zido_precheck
 
-_klammer_line_init() {
+_zido_line_init() {
     # Bump the id so in-flight responses for the PREVIOUS line are dropped —
     # otherwise they render that line's candidates onto the fresh prompt.
-    (( ++_klammer_id ))
-    _klammer_lastkey="<reset>"
-    if [[ $_klammer_mode == search ]]; then
-        _klammer_mode=inline
+    (( ++_zido_id ))
+    _zido_lastkey="<reset>"
+    if [[ $_zido_mode == search ]]; then
+        _zido_mode=inline
         zle -K main 2>/dev/null
     fi
-    _klammer_clear_display
+    _zido_clear_display
 }
-add-zle-hook-widget line-init _klammer_line_init
+add-zle-hook-widget line-init _zido_line_init
 
 # ----- widgets ----------------------------------------------------------------
 
-_klammer_accept() {
-    if (( $#_klammer_cands )) && [[ $_klammer_state == (multi|single) ]]; then
-        local cand=$_klammer_cands[$_klammer_sel]
-        local before=${BUFFER[1,$_klammer_wstart]}
+_zido_accept() {
+    if (( $#_zido_cands )) && [[ $_zido_state == (multi|single) ]]; then
+        local cand=$_zido_cands[$_zido_sel]
+        local before=${BUFFER[1,$_zido_wstart]}
         local after=${BUFFER[$((CURSOR + 1)),-1]}
         BUFFER="${before}${cand}${after}"
-        CURSOR=$(( _klammer_wstart + $#cand ))
+        CURSOR=$(( _zido_wstart + $#cand ))
         if [[ $cand != */ ]] && (( CURSOR == $#BUFFER )); then
             BUFFER+=" "
             (( CURSOR++ ))
@@ -398,225 +399,225 @@ _klammer_accept() {
         zle expand-or-complete
     fi
 }
-zle -N _klammer_accept
+zle -N _zido_accept
 
-_klammer_next() {
-    (( $#_klammer_cands > 1 )) || return 0
-    (( _klammer_sel < $#_klammer_cands )) && (( _klammer_sel++ ))
-    _klammer_render_apply
+_zido_next() {
+    (( $#_zido_cands > 1 )) || return 0
+    (( _zido_sel < $#_zido_cands )) && (( _zido_sel++ ))
+    _zido_render_apply
 }
-zle -N _klammer_next
+zle -N _zido_next
 
-_klammer_prev() {
-    (( $#_klammer_cands > 1 )) || return 0
-    (( _klammer_sel > 1 )) && (( _klammer_sel-- ))
-    (( _klammer_sel < _klammer_off )) && _klammer_off=$_klammer_sel
-    _klammer_render_apply
+_zido_prev() {
+    (( $#_zido_cands > 1 )) || return 0
+    (( _zido_sel > 1 )) && (( _zido_sel-- ))
+    (( _zido_sel < _zido_off )) && _zido_off=$_zido_sel
+    _zido_render_apply
 }
-zle -N _klammer_prev
+zle -N _zido_prev
 
-_klammer_fetch_lines() {
-    _klammer_sync_connect || return 1
+_zido_fetch_lines() {
+    _zido_sync_connect || return 1
     local cwd buf line
-    _klammer_escape "$PWD";    cwd=$REPLY
-    _klammer_escape "$BUFFER"; buf=$REPLY
-    print -nu $_klammer_fd_sync -- "L"$'\t'"1"$'\t'"$cwd"$'\t'"$buf"$'\n' 2>/dev/null || {
-        exec {_klammer_fd_sync}>&- 2>/dev/null
-        _klammer_fd_sync=""
+    _zido_escape "$PWD";    cwd=$REPLY
+    _zido_escape "$BUFFER"; buf=$REPLY
+    print -nu $_zido_fd_sync -- "L"$'\t'"1"$'\t'"$cwd"$'\t'"$buf"$'\n' 2>/dev/null || {
+        exec {_zido_fd_sync}>&- 2>/dev/null
+        _zido_fd_sync=""
         return 1
     }
-    IFS= read -r -t 1 -u $_klammer_fd_sync line || return 1
+    IFS= read -r -t 1 -u $_zido_fd_sync line || return 1
     [[ $line == R$'\t'* ]] || return 1
     local -a f
     f=("${(@ps:\t:)line}")
-    _klammer_lines=()
+    _zido_lines=()
     if (( $#f >= 6 )) && [[ -n $f[6] ]]; then
         local p
         for p in "${(@ps:\x1f:)f[6]}"; do
-            _klammer_unescape "${p%%$'\x1e'*}"
-            _klammer_lines+=("$REPLY")
+            _zido_unescape "${p%%$'\x1e'*}"
+            _zido_lines+=("$REPLY")
         done
     fi
-    (( $#_klammer_lines ))
+    (( $#_zido_lines ))
 }
 
-_klammer_hist_up() {
-    if (( ! $#_klammer_lines )); then
-        _klammer_fetch_lines || { zle up-line-or-history; return }
-        _klammer_origin=$BUFFER
-        _klammer_lidx=0
+_zido_hist_up() {
+    if (( ! $#_zido_lines )); then
+        _zido_fetch_lines || { zle up-line-or-history; return }
+        _zido_origin=$BUFFER
+        _zido_lidx=0
     fi
-    (( _klammer_lidx < $#_klammer_lines )) && (( _klammer_lidx++ ))
-    _klammer_inhist=1
-    BUFFER=$_klammer_lines[_klammer_lidx]
+    (( _zido_lidx < $#_zido_lines )) && (( _zido_lidx++ ))
+    _zido_inhist=1
+    BUFFER=$_zido_lines[_zido_lidx]
     CURSOR=$#BUFFER
 }
-zle -N _klammer_hist_up
+zle -N _zido_hist_up
 
-_klammer_hist_down() {
-    if (( _klammer_lidx <= 0 )); then
+_zido_hist_down() {
+    if (( _zido_lidx <= 0 )); then
         zle down-line-or-history
         return
     fi
-    (( _klammer_lidx-- ))
-    _klammer_inhist=1
-    if (( _klammer_lidx == 0 )); then
-        BUFFER=$_klammer_origin
+    (( _zido_lidx-- ))
+    _zido_inhist=1
+    if (( _zido_lidx == 0 )); then
+        BUFFER=$_zido_origin
     else
-        BUFFER=$_klammer_lines[_klammer_lidx]
+        BUFFER=$_zido_lines[_zido_lidx]
     fi
     CURSOR=$#BUFFER
 }
-zle -N _klammer_hist_down
+zle -N _zido_hist_down
 
-_klammer_dismiss() {
-    _klammer_suppress=1
-    _klammer_clear_display
+_zido_dismiss() {
+    _zido_suppress=1
+    _zido_clear_display
 }
-zle -N _klammer_dismiss
+zle -N _zido_dismiss
 
 # ----- ^R search mode -----------------------------------------------------------
 
-_klammer_search_enter() {
-    [[ $_klammer_mode == search ]] && return
-    _klammer_mode=search
-    _klammer_saved=$BUFFER
-    _klammer_saved_cur=$CURSOR
-    zle -K klammer-search
+_zido_search_enter() {
+    [[ $_zido_mode == search ]] && return
+    _zido_mode=search
+    _zido_saved=$BUFFER
+    _zido_saved_cur=$CURSOR
+    zle -K zido-search
     # Entering changes nothing visible, so no redraw hook fires: query and
     # render explicitly. The stale inline word candidates must not leak into
     # the list.
-    _klammer_cands=() _klammer_srcs=() _klammer_inds=()
-    _klammer_total=0
-    _klammer_sel=1
-    _klammer_off=1
-    _klammer_lastkey="$CURSOR:$BUFFER"
-    _klammer_send_query
-    _klammer_render_search
+    _zido_cands=() _zido_srcs=() _zido_inds=()
+    _zido_total=0
+    _zido_sel=1
+    _zido_off=1
+    _zido_lastkey="$CURSOR:$BUFFER"
+    _zido_send_query
+    _zido_render_search
 }
-zle -N _klammer_search_enter
+zle -N _zido_search_enter
 
-_klammer_search_exit() {
-    _klammer_mode=inline
+_zido_search_exit() {
+    _zido_mode=inline
     zle -K main
-    _klammer_lastkey="<reset>"
-    _klammer_clear_display
+    _zido_lastkey="<reset>"
+    _zido_clear_display
 }
 
-_klammer_search_accept() {
-    if (( $#_klammer_cands )); then
-        BUFFER=$_klammer_cands[$_klammer_sel]
+_zido_search_accept() {
+    if (( $#_zido_cands )); then
+        BUFFER=$_zido_cands[$_zido_sel]
         CURSOR=$#BUFFER
     fi
-    _klammer_search_exit
+    _zido_search_exit
 }
-zle -N _klammer_search_accept
+zle -N _zido_search_accept
 
-_klammer_search_cancel() {
-    BUFFER=$_klammer_saved
-    CURSOR=$_klammer_saved_cur
-    _klammer_search_exit
+_zido_search_cancel() {
+    BUFFER=$_zido_saved
+    CURSOR=$_zido_saved_cur
+    _zido_search_exit
 }
-zle -N _klammer_search_cancel
+zle -N _zido_search_cancel
 
-_klammer_search_down() {
-    (( _klammer_sel < $#_klammer_cands )) && (( _klammer_sel++ ))
-    _klammer_render_search
+_zido_search_down() {
+    (( _zido_sel < $#_zido_cands )) && (( _zido_sel++ ))
+    _zido_render_search
 }
-zle -N _klammer_search_down
+zle -N _zido_search_down
 
-_klammer_search_up() {
-    (( _klammer_sel > 1 )) && (( _klammer_sel-- ))
-    _klammer_render_search
+_zido_search_up() {
+    (( _zido_sel > 1 )) && (( _zido_sel-- ))
+    _zido_render_search
 }
-zle -N _klammer_search_up
+zle -N _zido_search_up
 
-_klammer_accept_line() {
-    _klammer_clear_display
+_zido_accept_line() {
+    _zido_clear_display
     zle .accept-line
 }
-zle -N _klammer_accept_line
+zle -N _zido_accept_line
 
 # ----- recording ---------------------------------------------------------------
 
-_klammer_preexec() {
-    typeset -g _klammer_t0=$EPOCHREALTIME
-    typeset -g _klammer_lastcmd=$1
-    typeset -g _klammer_lastpwd=$PWD
+_zido_preexec() {
+    typeset -g _zido_t0=$EPOCHREALTIME
+    typeset -g _zido_lastcmd=$1
+    typeset -g _zido_lastpwd=$PWD
 }
 
-_klammer_precmd() {
+_zido_precmd() {
     local -i ex=$?
-    [[ -n ${_klammer_lastcmd:-} ]] || return 0
+    [[ -n ${_zido_lastcmd:-} ]] || return 0
     local -F dur_f=0
-    [[ -n ${_klammer_t0:-} ]] && dur_f=$(( (EPOCHREALTIME - _klammer_t0) * 1000 ))
+    [[ -n ${_zido_t0:-} ]] && dur_f=$(( (EPOCHREALTIME - _zido_t0) * 1000 ))
     local -i dur=$dur_f
-    if _klammer_sync_connect; then
+    if _zido_sync_connect; then
         local cwd cmd
-        _klammer_escape "${_klammer_lastpwd:-$PWD}"; cwd=$REPLY
-        _klammer_escape "$_klammer_lastcmd";         cmd=$REPLY
-        print -nu $_klammer_fd_sync -- "H"$'\t'"$ex"$'\t'"$dur"$'\t'"$cwd"$'\t'"$cmd"$'\n' 2>/dev/null || {
-            exec {_klammer_fd_sync}>&- 2>/dev/null
-            _klammer_fd_sync=""
+        _zido_escape "${_zido_lastpwd:-$PWD}"; cwd=$REPLY
+        _zido_escape "$_zido_lastcmd";         cmd=$REPLY
+        print -nu $_zido_fd_sync -- "H"$'\t'"$ex"$'\t'"$dur"$'\t'"$cwd"$'\t'"$cmd"$'\n' 2>/dev/null || {
+            exec {_zido_fd_sync}>&- 2>/dev/null
+            _zido_fd_sync=""
         }
     fi
-    _klammer_lastcmd=""
+    _zido_lastcmd=""
 }
 
 autoload -Uz add-zsh-hook
-if [[ -z $KLAMMER_NO_RECORD ]]; then
-    add-zsh-hook preexec _klammer_preexec
-    add-zsh-hook precmd _klammer_precmd
+if [[ -z $ZIDO_NO_RECORD ]]; then
+    add-zsh-hook preexec _zido_preexec
+    add-zsh-hook precmd _zido_precmd
 fi
 
 # ----- key bindings --------------------------------------------------------------
 
-bindkey '^I' _klammer_accept
+bindkey '^I' _zido_accept
 # zsh ships a whole ^X-prefix keymap (^X^X exchange-point-and-mark, ^Xu undo,
 # ^Xr isearch, ...). With those alive, a plain ^X waits KEYTIMEOUT for a
 # second key and swallows the next keystroke as a combo. Clear the prefix,
 # then bind.
 bindkey -rp '^X' 2>/dev/null
-bindkey '^X' _klammer_next
-bindkey '^Z' _klammer_prev
+bindkey '^X' _zido_next
+bindkey '^Z' _zido_prev
 
 # Anything running after us (a second compinit appended by an installer, a
 # plugin) can re-create ^X-prefixed bindings and bring the keytimeout lag
 # back. Re-clear once after the whole startup is done.
-_klammer_bind_fix() {
+_zido_bind_fix() {
     bindkey -rp '^X' 2>/dev/null
-    bindkey '^X' _klammer_next
-    bindkey -M klammer-search -rp '^X' 2>/dev/null
-    bindkey -M klammer-search '^X' _klammer_search_down 2>/dev/null
-    add-zsh-hook -d precmd _klammer_bind_fix
+    bindkey '^X' _zido_next
+    bindkey -M zido-search -rp '^X' 2>/dev/null
+    bindkey -M zido-search '^X' _zido_search_down 2>/dev/null
+    add-zsh-hook -d precmd _zido_bind_fix
 }
 autoload -Uz add-zsh-hook
-add-zsh-hook precmd _klammer_bind_fix
-bindkey '^[[A' _klammer_hist_up
-bindkey '^[[B' _klammer_hist_down
-bindkey '^P'   _klammer_hist_up
-bindkey '^N'   _klammer_hist_down
-bindkey '^G'   _klammer_dismiss
-bindkey '^M'   _klammer_accept_line
-bindkey '^J'   _klammer_accept_line
-bindkey '^R'   _klammer_search_enter
+add-zsh-hook precmd _zido_bind_fix
+bindkey '^[[A' _zido_hist_up
+bindkey '^[[B' _zido_hist_down
+bindkey '^P'   _zido_hist_up
+bindkey '^N'   _zido_hist_down
+bindkey '^G'   _zido_dismiss
+bindkey '^M'   _zido_accept_line
+bindkey '^J'   _zido_accept_line
+bindkey '^R'   _zido_search_enter
 
 # Search-mode keymap: copy of main so typing edits the query, with the
 # navigation/accept keys swapped. ^X prefix cleared in the copy too.
-bindkey -N klammer-search main
-bindkey -M klammer-search -rp '^X' 2>/dev/null
-bindkey -M klammer-search '^M' _klammer_search_accept
-bindkey -M klammer-search '^J' _klammer_search_accept
-bindkey -M klammer-search '^I' _klammer_search_accept
-bindkey -M klammer-search '^G' _klammer_search_cancel
-bindkey -M klammer-search '^R' _klammer_search_cancel
-bindkey -M klammer-search '^[[A' _klammer_search_up
-bindkey -M klammer-search '^[[B' _klammer_search_down
-bindkey -M klammer-search '^P' _klammer_search_up
-bindkey -M klammer-search '^N' _klammer_search_down
-bindkey -M klammer-search '^X' _klammer_search_down
-bindkey -M klammer-search '^Z' _klammer_search_up
+bindkey -N zido-search main
+bindkey -M zido-search -rp '^X' 2>/dev/null
+bindkey -M zido-search '^M' _zido_search_accept
+bindkey -M zido-search '^J' _zido_search_accept
+bindkey -M zido-search '^I' _zido_search_accept
+bindkey -M zido-search '^G' _zido_search_cancel
+bindkey -M zido-search '^R' _zido_search_cancel
+bindkey -M zido-search '^[[A' _zido_search_up
+bindkey -M zido-search '^[[B' _zido_search_down
+bindkey -M zido-search '^P' _zido_search_up
+bindkey -M zido-search '^N' _zido_search_down
+bindkey -M zido-search '^X' _zido_search_down
+bindkey -M zido-search '^Z' _zido_search_up
 
 # Prompt width of the input line (last PROMPT line), for width budgeting.
-_klammer_prompt_w=${#${(%%)${PROMPT##*$'\n'}}}
-(( _klammer_prompt_w >= COLUMNS )) && _klammer_prompt_w=3
+_zido_prompt_w=${#${(%%)${PROMPT##*$'\n'}}}
+(( _zido_prompt_w >= COLUMNS )) && _zido_prompt_w=3

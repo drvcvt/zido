@@ -73,14 +73,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "klammer"
-version = "0.1.0"
-dependencies = [
- "nucleo-matcher",
- "rusqlite",
-]
-
-[[package]]
 name = "libsqlite3-sys"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -216,4 +208,12 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "zido"
+version = "0.1.0"
+dependencies = [
+ "nucleo-matcher",
+ "rusqlite",
 ]

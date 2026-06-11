@@ -1,23 +1,23 @@
 #!/usr/bin/env zsh
 # Integration tests for the zle frontend. Drives a real interactive zsh in a
 # zpty and asserts on BUFFER/CURSOR/POSTDISPLAY via a dump widget bound to ^T
-# inside the test session (no ANSI scraping). Requires the klammer binary in
+# inside the test session (no ANSI scraping). Requires the zido binary in
 # PATH; spawns the daemon if needed. Run: zsh scripts/zle-test.zsh
 
 emulate -L zsh
 zmodload zsh/zpty || { print "zpty unavailable"; exit 1 }
 
 typeset -gi pass=0 fail=0
-typeset -g state=/tmp/klammer-zletest.$$
+typeset -g state=/tmp/zido-zletest.$$
 
 cleanup() {
-    zpty -d klam 2>/dev/null
-    rm -f $state /tmp/klammer-zletest-setup.$$
+    zpty -d zsess 2>/dev/null
+    rm -f $state /tmp/zido-zletest-setup.$$
 }
 trap cleanup EXIT
 
-send() { zpty -n -w klam "$1" }
-drain() { local c; while zpty -r -t klam c 2>/dev/null; do :; done }
+send() { zpty -n -w zsess "$1" }
+drain() { local c; while zpty -r -t zsess c 2>/dev/null; do :; done }
 
 # Press ^T in the session; the dump widget writes the state file.
 dump() {
@@ -70,7 +70,7 @@ new_line() {
 
 # ---- session setup -----------------------------------------------------------
 
-setup=/tmp/klammer-zletest-setup.$$
+setup=/tmp/zido-zletest-setup.$$
 cat > $setup <<EOF
 _kt() {
     {
@@ -78,19 +78,19 @@ _kt() {
         print -r -- "CUR=\$CURSOR"
         print -r -- "PD=\$POSTDISPLAY"
         print -r -- "PDF=\${POSTDISPLAY//\$'\n'/@@}"
-        print -r -- "SEL=\$_klammer_sel"
-        print -r -- "OFF=\$_klammer_off"
-        print -r -- "MODE=\$_klammer_mode"
-        print -r -- "C1=\${_klammer_cands[1]}"
+        print -r -- "SEL=\$_zido_sel"
+        print -r -- "OFF=\$_zido_off"
+        print -r -- "MODE=\$_zido_mode"
+        print -r -- "C1=\${_zido_cands[1]}"
     } >| $state
 }
 zle -N _kt
 bindkey "^T" _kt
-bindkey -M klammer-search "^T" _kt 2>/dev/null
+bindkey -M zido-search "^T" _kt 2>/dev/null
 print KLAMTEST-READY
 EOF
 
-zpty klam env KLAMMER_NO_RECORD=1 zsh -i || { print "cannot spawn zsh"; exit 1 }
+zpty zsess env ZIDO_NO_RECORD=1 zsh -i || { print "cannot spawn zsh"; exit 1 }
 sleep 1.5
 drain
 send "source $setup"
@@ -98,7 +98,7 @@ send $'\r'
 # wait for the marker so tests never start against a half-initialised session
 ready=0
 for i in {1..60}; do
-    if zpty -r -t klam c 2>/dev/null && [[ $c == *KLAMTEST-READY* ]]; then
+    if zpty -r -t zsess c 2>/dev/null && [[ $c == *KLAMTEST-READY* ]]; then
         ready=1; break
     fi
     sleep 0.1
@@ -186,12 +186,12 @@ dump && check "T8-down-restores" 'cargo b' "$(field BUF)"
 
 # T9: RET executes the literal buffer, braces never auto-accepted
 new_line
-send 'echo klamtest-literal'; sleep 0.8
+send 'echo zidotest-literal'; sleep 0.8
 send $'\r'; sleep 0.8
 out=""
-while zpty -r -t klam c 2>/dev/null; do out+=$c; done
+while zpty -r -t zsess c 2>/dev/null; do out+=$c; done
 clean=$(print -r -- "$out" | sed -e $'s/\x1b\\[[0-9;]*[a-zA-Z]//g' -e $'s/\r//g')
-if [[ $clean == *"klamtest-literal"* ]]; then
+if [[ $clean == *"zidotest-literal"* ]]; then
     (( pass++ )); print "PASS T9-ret-literal"
 else
     (( fail++ )); print "FAIL T9-ret-literal: output was '$clean'"

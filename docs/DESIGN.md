@@ -1,4 +1,4 @@
-# klammer — ido-style inline completion for the shell
+# zido — ido-style inline completion for the shell
 
 One system replacing zsh-autosuggestions, fzf-tab, atuin's UI and
 history-substring-search: while you type, candidates appear inline after the
@@ -36,8 +36,8 @@ rejected (flow control / isearch collisions).
 ## Architecture
 
 ```
-klammer (one Rust binary)
-├── daemon: unix socket at $XDG_RUNTIME_DIR/klammer.sock, line protocol
+zido (one Rust binary)
+├── daemon: unix socket at $XDG_RUNTIME_DIR/zido.sock, line protocol
 ├── matcher: nucleo (helix's fzf-style matcher)
 ├── ranking: match quality × source bonus × frecency × cwd context
 └── history recorder → own sqlite (cmd, cwd, exit, duration, ts, session)
@@ -101,4 +101,4 @@ Two connections per shell: one async (Q/R, zle -F), one sync (L, H).
 - Per-keystroke latency: daemon + async + stale-drop; measure early.
 - compsys capture via zpty is the ugliest part — isolated in phase 2.
 - zsh-syntax-highlighting also touches region_highlight; we tag our entries
-  with `memo=klammer` (zsh 5.9) and load before it.
+  with `memo=zido` (zsh 5.9) and load before it.

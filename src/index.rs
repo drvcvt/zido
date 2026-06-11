@@ -540,7 +540,7 @@ mod tests {
     }
 
     fn pathify_fixture() -> String {
-        let base = std::env::temp_dir().join("klammer-test-pathify");
+        let base = std::env::temp_dir().join("zido-test-pathify");
         let _ = std::fs::create_dir_all(base.join("bash-kurs"));
         let _ = std::fs::create_dir_all(base.join("projects"));
         let _ = std::fs::write(base.join("notes.txt"), "x");

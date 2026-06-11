@@ -1,5 +1,5 @@
 [package]
-name = "klammer"
+name = "zido"
 version = "0.1.0"
 edition = "2021"
 description = "ido-style inline completion and history for the shell"
