@@ -75,7 +75,18 @@ fn handle(stream: UnixStream, state: Arc<Mutex<State>>) {
                 }
             }
             Request::Lines { id, cwd, buffer } => {
-                let reply = state.lock().unwrap().index.query_lines(id, &buffer, &cwd);
+                let reply = state
+                    .lock()
+                    .unwrap()
+                    .index
+                    .query_lines(id, &buffer, &cwd, index::LINES_LIMIT);
+                if writer.write_all(reply.format().as_bytes()).is_err() {
+                    break;
+                }
+            }
+            Request::Search { id, limit, cwd, query } => {
+                let limit = limit.clamp(1, index::SEARCH_LIMIT);
+                let reply = state.lock().unwrap().index.query_lines(id, &query, &cwd, limit);
                 if writer.write_all(reply.format().as_bytes()).is_err() {
                     break;
                 }

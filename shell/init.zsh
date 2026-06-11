@@ -16,8 +16,11 @@ typeset -gi _klammer_id=0 _klammer_wstart=0 _klammer_total=0
 typeset -gi _klammer_suppress=0 _klammer_inhist=0 _klammer_lidx=0
 typeset -gi _klammer_sel=1 _klammer_off=1
 typeset -g _klammer_state=empty _klammer_lastkey="<reset>" _klammer_origin=""
-typeset -ga _klammer_cands _klammer_srcs _klammer_lines
+typeset -ga _klammer_cands _klammer_srcs _klammer_inds _klammer_lines
 typeset -g _klammer_prompt_w=3
+# inline = braces while typing; search = ^R atuin-style vertical list
+typeset -g _klammer_mode=inline _klammer_saved=""
+typeset -gi _klammer_saved_cur=0 _klammer_pending=0
 
 # Colours per source; frame = braces and separators; sel = the selection
 # block (light grey background, black text).
@@ -27,9 +30,11 @@ typeset -gA _klammer_color=(
     exec    'fg=2'
     file    'fg=4'
     dir     'fg=4,bold'
-    frame   'fg=8'
-    nomatch 'fg=1'
-    sel     'fg=0,bg=250'
+    frame    'fg=8'
+    nomatch  'fg=1'
+    sel      'fg=0,bg=250'
+    match    'fg=3,bold'
+    selmatch 'fg=0,bg=250,bold,underline'
 )
 
 # ----- daemon / connections -------------------------------------------------
@@ -93,10 +98,16 @@ _klammer_send_query() {
         _klammer_connect || { _klammer_clear_display; return }
     fi
     (( ++_klammer_id ))
-    local cwd buf
+    local cwd buf req
     _klammer_escape "$PWD";    cwd=$REPLY
     _klammer_escape "$BUFFER"; buf=$REPLY
-    if ! print -nu $_klammer_fd -- "Q"$'\t'"$_klammer_id"$'\t'"$COLUMNS"$'\t'"$CURSOR"$'\t'"$cwd"$'\t'"$buf"$'\n' 2>/dev/null; then
+    if [[ $_klammer_mode == search ]]; then
+        req="S"$'\t'"$_klammer_id"$'\t'"50"$'\t'"$cwd"$'\t'"$buf"$'\n'
+    else
+        req="Q"$'\t'"$_klammer_id"$'\t'"$COLUMNS"$'\t'"$CURSOR"$'\t'"$cwd"$'\t'"$buf"$'\n'
+    fi
+    _klammer_pending=1
+    if ! print -nu $_klammer_fd -- "$req" 2>/dev/null; then
         local fd=$_klammer_fd
         zle -F $fd 2>/dev/null
         exec {fd}>&- 2>/dev/null
@@ -128,6 +139,7 @@ _klammer_io_handler() {
     # the list since, and a late duplicate would snap it back.
     (( f[2] == _klammer_rendered_id )) && return
     typeset -g _klammer_rendered_id=$f[2]
+    _klammer_pending=0
     _klammer_state=$f[3]
     _klammer_wstart=$f[4]
     _klammer_total=$f[5]
@@ -135,12 +147,16 @@ _klammer_io_handler() {
     _klammer_off=1
     _klammer_cands=()
     _klammer_srcs=()
+    _klammer_inds=()
     if (( $#f >= 6 )) && [[ -n $f[6] ]]; then
         local p
+        local -a cf
         for p in "${(@ps:\x1f:)f[6]}"; do
-            _klammer_unescape "${p%%$'\x1e'*}"
+            cf=("${(@ps:\x1e:)p}")
+            _klammer_unescape "${cf[1]}"
             _klammer_cands+=("$REPLY")
-            _klammer_srcs+=("${p#*$'\x1e'}")
+            _klammer_srcs+=("${cf[2]:-hist}")
+            _klammer_inds+=("${cf[3]:-}")
         done
     fi
     zle _klammer-render 2>/dev/null
@@ -165,6 +181,10 @@ _klammer_clear_display() {
 }
 
 _klammer_render_apply() {
+    if [[ $_klammer_mode == search ]]; then
+        _klammer_render_search
+        return
+    fi
     region_highlight=("${(@)region_highlight:#*memo=klammer*}")
     if (( _klammer_suppress )) || [[ $_klammer_state == empty ]]; then
         POSTDISPLAY=""
@@ -251,6 +271,80 @@ _klammer_render_apply() {
         region_highlight+=("$((base + parts[1])) $((base + parts[2])) ${parts[3]} memo=klammer")
     done
 }
+# ^R search: atuin-like vertical list under the prompt, ido-styled —
+# `{` opens, `|` leads each line, `…+N }` closes. The selection block walks
+# the lines, matched chars are highlighted.
+_klammer_render_search() {
+    region_highlight=("${(@)region_highlight:#*memo=klammer*}")
+    local -i base=$#BUFFER
+    local pd=""
+    local -a hl
+
+    if (( ! $#_klammer_cands )); then
+        if (( _klammer_pending )); then
+            pd=$'\n'"{ … }"
+        else
+            pd=$'\n'"{ no matches }"
+        fi
+        hl+=("0 $#pd ${_klammer_color[frame]}")
+    else
+        local -i rows=8 avail=$(( COLUMNS - 6 ))
+        (( avail < 20 )) && avail=20
+        local -i off=$_klammer_off
+        (( off < 1 )) && off=1
+        (( _klammer_sel < off )) && off=$_klammer_sel
+        (( _klammer_sel > off + rows - 1 )) && off=$(( _klammer_sel - rows + 1 ))
+        _klammer_off=$off
+
+        local -i i n=0 lstart clipped p
+        local line marker mspec
+        for (( i = off; i <= $#_klammer_cands && n < rows; i++ )); do
+            line=${_klammer_cands[i]//$'\n'/ }
+            clipped=0
+            if (( $#line > avail )); then
+                line="${line[1,avail]}…"
+                clipped=$avail
+            fi
+            if (( n == 0 )); then
+                if (( off == 1 )); then marker="{ "; else marker="… "; fi
+            else
+                marker="| "
+            fi
+            pd+=$'\n'
+            hl+=("$#pd $(($#pd + 2)) ${_klammer_color[frame]}")
+            pd+=$marker
+            lstart=$#pd
+            if (( i == _klammer_sel )); then
+                hl+=("$lstart $((lstart + $#line)) ${_klammer_color[sel]}")
+                mspec=${_klammer_color[selmatch]}
+            else
+                mspec=${_klammer_color[match]}
+            fi
+            if [[ -n ${_klammer_inds[i]} ]]; then
+                for p in ${(s:,:)_klammer_inds[i]}; do
+                    (( clipped && p >= clipped )) && continue
+                    (( p >= $#line )) && continue
+                    hl+=("$((lstart + p)) $((lstart + p + 1)) $mspec")
+                done
+            fi
+            pd+=$line
+            (( n++ ))
+        done
+        local -i overflow=$(( _klammer_total - (off + n - 1) ))
+        local tail=" }"
+        (( overflow > 0 )) && tail=" …+${overflow} }"
+        hl+=("$#pd $(($#pd + $#tail)) ${_klammer_color[frame]}")
+        pd+=$tail
+    fi
+
+    POSTDISPLAY=$pd
+    local h
+    for h in "${hl[@]}"; do
+        local -a parts=(${(s: :)h})
+        region_highlight+=("$((base + parts[1])) $((base + parts[2])) ${parts[3]} memo=klammer")
+    done
+}
+
 zle -N _klammer-render _klammer_render_apply
 zle -N _klammer-clear _klammer_clear_display
 
@@ -279,6 +373,10 @@ _klammer_line_init() {
     # otherwise they render that line's candidates onto the fresh prompt.
     (( ++_klammer_id ))
     _klammer_lastkey="<reset>"
+    if [[ $_klammer_mode == search ]]; then
+        _klammer_mode=inline
+        zle -K main 2>/dev/null
+    fi
     _klammer_clear_display
 }
 add-zle-hook-widget line-init _klammer_line_init
@@ -377,6 +475,62 @@ _klammer_dismiss() {
 }
 zle -N _klammer_dismiss
 
+# ----- ^R search mode -----------------------------------------------------------
+
+_klammer_search_enter() {
+    [[ $_klammer_mode == search ]] && return
+    _klammer_mode=search
+    _klammer_saved=$BUFFER
+    _klammer_saved_cur=$CURSOR
+    zle -K klammer-search
+    # Entering changes nothing visible, so no redraw hook fires: query and
+    # render explicitly. The stale inline word candidates must not leak into
+    # the list.
+    _klammer_cands=() _klammer_srcs=() _klammer_inds=()
+    _klammer_total=0
+    _klammer_sel=1
+    _klammer_off=1
+    _klammer_lastkey="$CURSOR:$BUFFER"
+    _klammer_send_query
+    _klammer_render_search
+}
+zle -N _klammer_search_enter
+
+_klammer_search_exit() {
+    _klammer_mode=inline
+    zle -K main
+    _klammer_lastkey="<reset>"
+    _klammer_clear_display
+}
+
+_klammer_search_accept() {
+    if (( $#_klammer_cands )); then
+        BUFFER=$_klammer_cands[$_klammer_sel]
+        CURSOR=$#BUFFER
+    fi
+    _klammer_search_exit
+}
+zle -N _klammer_search_accept
+
+_klammer_search_cancel() {
+    BUFFER=$_klammer_saved
+    CURSOR=$_klammer_saved_cur
+    _klammer_search_exit
+}
+zle -N _klammer_search_cancel
+
+_klammer_search_down() {
+    (( _klammer_sel < $#_klammer_cands )) && (( _klammer_sel++ ))
+    _klammer_render_search
+}
+zle -N _klammer_search_down
+
+_klammer_search_up() {
+    (( _klammer_sel > 1 )) && (( _klammer_sel-- ))
+    _klammer_render_search
+}
+zle -N _klammer_search_up
+
 _klammer_accept_line() {
     _klammer_clear_display
     zle .accept-line
@@ -432,6 +586,8 @@ bindkey '^Z' _klammer_prev
 _klammer_bind_fix() {
     bindkey -rp '^X' 2>/dev/null
     bindkey '^X' _klammer_next
+    bindkey -M klammer-search -rp '^X' 2>/dev/null
+    bindkey -M klammer-search '^X' _klammer_search_down 2>/dev/null
     add-zsh-hook -d precmd _klammer_bind_fix
 }
 autoload -Uz add-zsh-hook
@@ -443,6 +599,23 @@ bindkey '^N'   _klammer_hist_down
 bindkey '^G'   _klammer_dismiss
 bindkey '^M'   _klammer_accept_line
 bindkey '^J'   _klammer_accept_line
+bindkey '^R'   _klammer_search_enter
+
+# Search-mode keymap: copy of main so typing edits the query, with the
+# navigation/accept keys swapped. ^X prefix cleared in the copy too.
+bindkey -N klammer-search main
+bindkey -M klammer-search -rp '^X' 2>/dev/null
+bindkey -M klammer-search '^M' _klammer_search_accept
+bindkey -M klammer-search '^J' _klammer_search_accept
+bindkey -M klammer-search '^I' _klammer_search_accept
+bindkey -M klammer-search '^G' _klammer_search_cancel
+bindkey -M klammer-search '^R' _klammer_search_cancel
+bindkey -M klammer-search '^[[A' _klammer_search_up
+bindkey -M klammer-search '^[[B' _klammer_search_down
+bindkey -M klammer-search '^P' _klammer_search_up
+bindkey -M klammer-search '^N' _klammer_search_down
+bindkey -M klammer-search '^X' _klammer_search_down
+bindkey -M klammer-search '^Z' _klammer_search_up
 
 # Prompt width of the input line (last PROMPT line), for width budgeting.
 _klammer_prompt_w=${#${(%%)${PROMPT##*$'\n'}}}

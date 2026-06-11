@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 // The frontend scrolls through candidates with a moving selection block, so
 // it needs the deep list, not just the visible window.
 const MAX_CANDIDATES: usize = 100;
-const MAX_LINES: usize = 20;
+pub const LINES_LIMIT: usize = 20;
+pub const SEARCH_LIMIT: usize = 50;
 
 // Score weights. Nucleo scores land around 30-200 for short words; the
 // context bonuses below are sized to reorder within similar match quality,
@@ -131,14 +132,14 @@ impl Index {
             word_start = ws + seg_start;
         } else if is_first {
             for e in &self.execs {
-                raw.push(Candidate { text: e.clone(), source: Source::Exec, score: 0 });
+                raw.push(Candidate { text: e.clone(), source: Source::Exec, score: 0, indices: vec![] });
             }
             for (t, _) in self.first_tokens.iter() {
-                raw.push(Candidate { text: t.clone(), source: Source::History, score: 0 });
+                raw.push(Candidate { text: t.clone(), source: Source::History, score: 0, indices: vec![] });
             }
         } else {
             for (t, _) in self.tokens.iter() {
-                raw.push(Candidate { text: t.clone(), source: Source::History, score: 0 });
+                raw.push(Candidate { text: t.clone(), source: Source::History, score: 0, indices: vec![] });
             }
             let (files, _) = sources::file_candidates(&word, cwd);
             raw.extend(files);
@@ -204,6 +205,7 @@ impl Index {
                     text: t.to_string(),
                     source: Source::History,
                     score: ((1.0 + count as f64).ln() * decay * W_FREC) as i64,
+                    indices: vec![],
                 }
             })
             .collect();
@@ -214,7 +216,7 @@ impl Index {
             let (files, _) = sources::file_candidates("", cwd);
             for f in files {
                 if f.source == Source::Dir && !cands.iter().any(|c| c.text == f.text) {
-                    cands.push(Candidate { text: f.text, source: Source::Dir, score: 1 });
+                    cands.push(Candidate { text: f.text, source: Source::Dir, score: 1, indices: vec![] });
                 }
             }
             cands.retain(|c| c.source == Source::Dir);
@@ -291,7 +293,7 @@ impl Index {
         out
     }
 
-    pub fn query_lines(&self, id: u64, buffer: &str, cwd: &str) -> Reply {
+    pub fn query_lines(&self, id: u64, buffer: &str, cwd: &str, limit: usize) -> Reply {
         let needle = buffer.trim();
         let mut matcher = Matcher::new(Config::DEFAULT);
         let pattern = Pattern::new(needle, CaseMatching::Smart, Normalization::Smart, AtomKind::Fuzzy);
@@ -347,11 +349,26 @@ impl Index {
             if !needle.is_empty() && cmd.to_lowercase().starts_with(&needle.to_lowercase()) {
                 score += W_PREFIX;
             }
-            cands.push(Candidate { text: cmd.to_string(), source: Source::Line, score });
+            cands.push(Candidate { text: cmd.to_string(), source: Source::Line, score, indices: vec![] });
         }
         cands.sort_by(|a, b| b.score.cmp(&a.score).then(a.text.cmp(&b.text)));
         let total = cands.len();
-        cands.truncate(MAX_LINES);
+        cands.truncate(limit);
+        // Match positions only for the survivors — the search UI highlights
+        // them; computing indices for every history line would be waste.
+        if !needle.is_empty() {
+            for c in cands.iter_mut() {
+                let mut inds: Vec<u32> = Vec::new();
+                if pattern
+                    .indices(Utf32Str::new(&c.text, &mut buf), &mut matcher, &mut inds)
+                    .is_some()
+                {
+                    inds.sort_unstable();
+                    inds.dedup();
+                    c.indices = inds;
+                }
+            }
+        }
         let state = if cands.is_empty() { State::Empty } else { State::Multi };
         Reply { id, state, word_start: 0, total, candidates: cands }
     }
@@ -588,13 +605,27 @@ mod tests {
     }
 
     #[test]
+    fn search_returns_match_indices() {
+        let idx = test_index(&[("cargo build --release", "/p", 0)]);
+        let r = idx.query_lines(1, "crgo", "/p", SEARCH_LIMIT);
+        assert!(!r.candidates.is_empty());
+        let c = &r.candidates[0];
+        assert!(!c.indices.is_empty());
+        // every reported index points at a char from the needle
+        for &i in &c.indices {
+            let ch = c.text.chars().nth(i as usize).unwrap();
+            assert!("crgo".contains(ch), "index {i} -> '{ch}'");
+        }
+    }
+
+    #[test]
     fn lines_rank_frequency_and_cwd() {
         let idx = test_index(&[
             ("cargo build", "/p", 0),
             ("cargo build", "/p", 0),
             ("cargo test", "/other", 0),
         ]);
-        let r = idx.query_lines(1, "car", "/p");
+        let r = idx.query_lines(1, "car", "/p", LINES_LIMIT);
         assert_eq!(r.candidates[0].text, "cargo build");
     }
 
@@ -606,7 +637,7 @@ mod tests {
             ("make all", "/p", 0),
             ("make all", "/p", 0),
         ]);
-        let r = idx.query_lines(1, "make", "/p");
+        let r = idx.query_lines(1, "make", "/p", LINES_LIMIT);
         assert_eq!(r.candidates[0].text, "make all");
     }
 }

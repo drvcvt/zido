@@ -61,7 +61,7 @@ pub fn file_candidates(word: &str, cwd: &str) -> (Vec<Candidate>, usize) {
         if is_dir {
             name.push('/');
         }
-        out.push(Candidate { text: name, source, score: 0 });
+        out.push(Candidate { text: name, source, score: 0, indices: vec![] });
     }
     (out, seg_start_chars)
 }

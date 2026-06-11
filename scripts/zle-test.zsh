@@ -12,7 +12,7 @@ typeset -g state=/tmp/klammer-zletest.$$
 
 cleanup() {
     zpty -d klam 2>/dev/null
-    rm -f $state
+    rm -f $state /tmp/klammer-zletest-setup.$$
 }
 trap cleanup EXIT
 
@@ -70,12 +70,40 @@ new_line() {
 
 # ---- session setup -----------------------------------------------------------
 
+setup=/tmp/klammer-zletest-setup.$$
+cat > $setup <<EOF
+_kt() {
+    {
+        print -r -- "BUF=\$BUFFER"
+        print -r -- "CUR=\$CURSOR"
+        print -r -- "PD=\$POSTDISPLAY"
+        print -r -- "PDF=\${POSTDISPLAY//\$'\n'/@@}"
+        print -r -- "SEL=\$_klammer_sel"
+        print -r -- "OFF=\$_klammer_off"
+        print -r -- "MODE=\$_klammer_mode"
+        print -r -- "C1=\${_klammer_cands[1]}"
+    } >| $state
+}
+zle -N _kt
+bindkey "^T" _kt
+bindkey -M klammer-search "^T" _kt 2>/dev/null
+print KLAMTEST-READY
+EOF
+
 zpty klam env KLAMMER_NO_RECORD=1 zsh -i || { print "cannot spawn zsh"; exit 1 }
 sleep 1.5
 drain
-send '_kt() { { print -r -- "BUF=$BUFFER"; print -r -- "CUR=$CURSOR"; print -r -- "PD=$POSTDISPLAY"; print -r -- "SEL=$_klammer_sel"; print -r -- "OFF=$_klammer_off"; print -r -- "C1=${_klammer_cands[1]}" } >| '$state' }; zle -N _kt; bindkey "^T" _kt'
+send "source $setup"
 send $'\r'
-sleep 0.8
+# wait for the marker so tests never start against a half-initialised session
+ready=0
+for i in {1..60}; do
+    if zpty -r -t klam c 2>/dev/null && [[ $c == *KLAMTEST-READY* ]]; then
+        ready=1; break
+    fi
+    sleep 0.1
+done
+(( ready )) || { sleep 1; drain }
 drain
 
 # ---- tests --------------------------------------------------------------------
@@ -83,7 +111,7 @@ drain
 # T1: braces render while typing, best candidate first
 send 'git ch'; sleep 1.0
 dump && {
-    check "T1-braces-render" ' {*|*}' "$(field PD)"
+    check "T1-braces-render" ' {*\|*}' "$(field PD)"
     check "T1-buffer-intact" 'git ch' "$(field BUF)"
 }
 typeset -g pd_before=$(field PD)
@@ -168,6 +196,38 @@ if [[ $clean == *"klamtest-literal"* ]]; then
 else
     (( fail++ )); print "FAIL T9-ret-literal: output was '$clean'"
 fi
+
+# T11: ^R opens the vertical search list (atuin-style, ido-framed)
+new_line
+send 'cargo'; sleep 0.6
+send $'\x12'; sleep 1.0
+dump && {
+    check "T11-search-mode" 'search' "$(field MODE)"
+    check "T11-vertical-list" '@@{ *' "$(field PDF)"
+    check "T11-multiple-rows" '*@@\| *' "$(field PDF)"
+    check "T11-query-kept" 'cargo' "$(field BUF)"
+}
+
+# T11b: arrow down moves the selection through the lines
+send $'\e[B'; sleep 0.4
+dump && check "T11b-selection-down" '2' "$(field SEL)"
+
+# T11c: RET accepts the selected line into the buffer and returns to inline
+send $'\r'; sleep 0.8
+dump && {
+    check "T11c-back-inline" 'inline' "$(field MODE)"
+    check "T11c-line-accepted" '*cargo*' "$(field BUF)"
+}
+
+# T11d: ^G cancels search and restores the typed buffer
+new_line
+send 'zzqq'; sleep 0.4
+send $'\x12'; sleep 0.8
+send $'\x07'; sleep 0.4
+dump && {
+    check "T11d-canceled-inline" 'inline' "$(field MODE)"
+    check "T11d-buffer-restored" 'zzqq' "$(field BUF)"
+}
 
 # T10: exactly one ^X binding — any surviving ^X-prefix combo makes zsh wait
 # KEYTIMEOUT (~400ms) before dispatching rotation. Runs last because it types

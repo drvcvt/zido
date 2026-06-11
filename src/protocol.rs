@@ -9,6 +9,7 @@ pub const FIELD_SEP: char = '\u{1e}';
 pub enum Request {
     Query { id: u64, cols: usize, cursor: usize, cwd: String, buffer: String },
     Lines { id: u64, cwd: String, buffer: String },
+    Search { id: u64, limit: usize, cwd: String, query: String },
     Record { exit: i32, duration_ms: i64, cwd: String, cmd: String },
 }
 
@@ -38,6 +39,9 @@ pub struct Candidate {
     pub text: String,
     pub source: Source,
     pub score: i64,
+    // Char positions matched by the pattern, for highlighting in the search
+    // UI. Empty for the inline word path.
+    pub indices: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,7 +76,17 @@ impl Reply {
         let cands: Vec<String> = self
             .candidates
             .iter()
-            .map(|c| format!("{}{}{}", escape(&c.text), FIELD_SEP, c.source.tag()))
+            .map(|c| {
+                let inds: Vec<String> = c.indices.iter().map(|i| i.to_string()).collect();
+                format!(
+                    "{}{}{}{}{}",
+                    escape(&c.text),
+                    FIELD_SEP,
+                    c.source.tag(),
+                    FIELD_SEP,
+                    inds.join(",")
+                )
+            })
             .collect();
         format!(
             "R\t{}\t{}\t{}\t{}\t{}\n",
@@ -137,6 +151,13 @@ pub fn parse_request(line: &str) -> Option<Request> {
             let cwd = unescape(fields.next()?);
             let buffer = unescape(&fields.collect::<Vec<_>>().join("\t"));
             Some(Request::Lines { id, cwd, buffer })
+        }
+        "S" => {
+            let id = fields.next()?.parse().ok()?;
+            let limit = fields.next()?.parse().ok()?;
+            let cwd = unescape(fields.next()?);
+            let query = unescape(&fields.collect::<Vec<_>>().join("\t"));
+            Some(Request::Search { id, limit, cwd, query })
         }
         "H" => {
             let exit = fields.next()?.parse().ok()?;
