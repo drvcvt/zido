@@ -169,6 +169,15 @@ else
     (( fail++ )); print "FAIL T9-ret-literal: output was '$clean'"
 fi
 
+# T10: exactly one ^X binding — any surviving ^X-prefix combo makes zsh wait
+# KEYTIMEOUT (~400ms) before dispatching rotation. Runs last because it types
+# and executes a real command line in the session.
+new_line
+rm -f $state
+send 'bindkey | grep -c "\"\^X" >| '$state
+send $'\r'; sleep 1.0
+check "T10-single-xbind" '1' "$(head -1 $state 2>/dev/null | tr -d '[:space:]')"
+
 # ---- report --------------------------------------------------------------------
 
 print "----"

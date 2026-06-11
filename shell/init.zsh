@@ -275,6 +275,9 @@ _klammer_precheck() {
 add-zle-hook-widget line-pre-redraw _klammer_precheck
 
 _klammer_line_init() {
+    # Bump the id so in-flight responses for the PREVIOUS line are dropped —
+    # otherwise they render that line's candidates onto the fresh prompt.
+    (( ++_klammer_id ))
     _klammer_lastkey="<reset>"
     _klammer_clear_display
 }
@@ -416,11 +419,23 @@ fi
 
 bindkey '^I' _klammer_accept
 # zsh ships a whole ^X-prefix keymap (^X^X exchange-point-and-mark, ^Xu undo,
-# ^Xr isearch, ...). With those alive, a plain ^X waits for a second key and
-# swallows the next keystroke as a combo. Clear the prefix, then bind.
+# ^Xr isearch, ...). With those alive, a plain ^X waits KEYTIMEOUT for a
+# second key and swallows the next keystroke as a combo. Clear the prefix,
+# then bind.
 bindkey -rp '^X' 2>/dev/null
 bindkey '^X' _klammer_next
 bindkey '^Z' _klammer_prev
+
+# Anything running after us (a second compinit appended by an installer, a
+# plugin) can re-create ^X-prefixed bindings and bring the keytimeout lag
+# back. Re-clear once after the whole startup is done.
+_klammer_bind_fix() {
+    bindkey -rp '^X' 2>/dev/null
+    bindkey '^X' _klammer_next
+    add-zsh-hook -d precmd _klammer_bind_fix
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd _klammer_bind_fix
 bindkey '^[[A' _klammer_hist_up
 bindkey '^[[B' _klammer_hist_down
 bindkey '^P'   _klammer_hist_up
