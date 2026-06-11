@@ -1,0 +1,14 @@
+[package]
+name = "klammer"
+version = "0.1.0"
+edition = "2021"
+description = "ido-style inline completion and history for the shell"
+license = "MIT"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+nucleo-matcher = "0.3"
+
+[profile.release]
+lto = true
+strip = true
